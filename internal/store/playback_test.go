@@ -42,7 +42,7 @@ func TestPlaybackOrdering(t *testing.T) {
 
 	// Playback from cursor=4 should yield seqs 5..10
 	var playedSeqs []int64
-	err := persist.Playback(ctx, 4, func(le LiveEvent) error {
+	err := persist.PlaybackFrames(ctx, 4, func(le LiveEvent) error {
 		playedSeqs = append(playedSeqs, le.RelaySeq)
 		return nil
 	})
@@ -287,7 +287,7 @@ func TestPlaybackEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	var count int
-	err := persist.Playback(ctx, 0, func(le LiveEvent) error {
+	err := persist.PlaybackFrames(ctx, 0, func(le LiveEvent) error {
 		count++
 		return nil
 	})

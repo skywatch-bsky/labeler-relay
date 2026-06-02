@@ -64,7 +64,7 @@ func TestPruneRemovesOldEvents(t *testing.T) {
 
 	// Verify playback from 0 yields only seqs 3, 4
 	var seqs []int64
-	err = persist.Playback(ctx, 0, func(le LiveEvent) error {
+	err = persist.PlaybackFrames(ctx, 0, func(le LiveEvent) error {
 		seqs = append(seqs, le.RelaySeq)
 		return nil
 	})
