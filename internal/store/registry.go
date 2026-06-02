@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 package store
 
 import (
