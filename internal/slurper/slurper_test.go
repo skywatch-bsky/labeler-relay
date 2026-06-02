@@ -302,8 +302,27 @@ func TestSlurperStopsDisabledLabelers(t *testing.T) {
 	}
 }
 
+// countEvents returns the number of stored events for a given labeler DID.
+func countEvents(t *testing.T, s *store.Store, did string) int64 {
+	t.Helper()
+	row := s.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM events WHERE labeler_did = ?`, did)
+	var n int64
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("failed to count events for %s: %v", did, err)
+	}
+	return n
+}
+
 // TestSlurperIsolatesRateLimitingPerLabeler verifies AC7.2: throttling one
-// labeler does not starve others.
+// upstream does not starve or block ingest from another. Each subscription
+// owns its own Limiter, so a saturated labeler blocks only its own goroutine.
+//
+// The two subscriptions are built directly with distinct limiters (rather than
+// via Reconcile, which applies one shared LimitConfig to every subscription).
+// The free labeler must finish all 5 frames while the saturated labeler is
+// still throttled below 5 at that same instant — proving the free goroutine
+// never waited on the saturated one.
 func TestSlurperIsolatesRateLimitingPerLabeler(t *testing.T) {
 	t.Parallel()
 
@@ -321,196 +340,117 @@ func TestSlurperIsolatesRateLimitingPerLabeler(t *testing.T) {
 	registry := store.NewLabelerRegistry(testStore)
 	persist := store.NewLabelPersist(testStore)
 
-	fakeServerSlow := newFakeLabelerServer(t)
-	fakeServerFast := newFakeLabelerServer(t)
-	defer fakeServerSlow.Close()
-	defer fakeServerFast.Close()
+	fakeServerSaturated := newFakeLabelerServer(t)
+	fakeServerFree := newFakeLabelerServer(t)
+	defer fakeServerSaturated.Close()
+	defer fakeServerFree.Close()
 
-	// Create a custom slurper with very tight limits for the slow labeler.
-	slurper := New(
-		registry,
-		persist,
-		false,
-		LimitConfig{PerSec: 1, PerHour: 100000}, // Very tight for demonstration
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	)
-	defer slurper.Shutdown()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Manually create subscriptions with different limiters.
-	labelerSlow := store.Labeler{
-		DID:      "did:plc:slow",
-		Endpoint: fakeServerSlow.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+	labelerSaturated := store.Labeler{
+		DID:      "did:plc:saturated",
+		Endpoint: fakeServerSaturated.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
 		Source:   "test",
 		Enabled:  true,
 	}
-	labelerFast := store.Labeler{
-		DID:      "did:plc:fast",
-		Endpoint: fakeServerFast.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+	labelerFree := store.Labeler{
+		DID:      "did:plc:free",
+		Endpoint: fakeServerFree.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
 		Source:   "test",
 		Enabled:  true,
 	}
-
-	if err := registry.Upsert(context.Background(), labelerSlow); err != nil {
-		t.Fatalf("failed to insert labelerSlow: %v", err)
+	if err := registry.Upsert(context.Background(), labelerSaturated); err != nil {
+		t.Fatalf("failed to insert saturated labeler: %v", err)
 	}
-	if err := registry.Upsert(context.Background(), labelerFast); err != nil {
-		t.Fatalf("failed to insert labelerFast: %v", err)
-	}
-
-	// Reconcile to create subscriptions.
-	if err := slurper.Reconcile(context.Background()); err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
+	if err := registry.Upsert(context.Background(), labelerFree); err != nil {
+		t.Fatalf("failed to insert free labeler: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Wait for both WebSockets.
+	// Build two subscriptions directly with DISTINCT limiters. The saturated
+	// labeler gets 1 token/sec (so 5 frames take ~4s); the free labeler gets a
+	// high limit (effectively unthrottled).
+	subSaturated := &subscription{
+		labeler:    labelerSaturated,
+		persist:    persist,
+		registry:   registry,
+		limiter:    NewLimiter(1, 100000),
+		sigDefault: false,
+		log:        log,
+	}
+	subFree := &subscription{
+		labeler:    labelerFree,
+		persist:    persist,
+		registry:   registry,
+		limiter:    NewLimiter(1000, 100000),
+		sigDefault: false,
+		log:        log,
+	}
+
+	go func() { _ = subSaturated.run(ctx) }()
+	go func() { _ = subFree.run(ctx) }()
+
+	// Wait for both upstream connections.
 	select {
-	case <-fakeServerSlow.wsReady:
+	case <-fakeServerSaturated.wsReady:
 	case <-ctx.Done():
-		t.Fatalf("timeout waiting for slow server")
+		t.Fatalf("timeout waiting for saturated server")
 	}
-
 	select {
-	case <-fakeServerFast.wsReady:
+	case <-fakeServerFree.wsReady:
 	case <-ctx.Done():
-		t.Fatalf("timeout waiting for fast server")
+		t.Fatalf("timeout waiting for free server")
 	}
 
-	// Send multiple frames rapidly from both servers.
-	// The slow labeler's limiter will throttle it.
-	// The fast labeler should ingest without waiting for the slow one.
-
-	// Send 5 frames from slow server (should be throttled).
-	for i := 1; i <= 5; i++ {
-		frame := &atproto.LabelSubscribeLabels_Labels{
-			Labels: []*atproto.LabelDefs_Label{
-				{
-					Src: labelerSlow.DID,
-					Uri: fmt.Sprintf("at://did:plc:user/app.bsky.feed.post/slow%d", i),
-					Val: "slow",
-					Cts: time.Now().UTC().Format(time.RFC3339),
+	sendFrames := func(srv *fakeLabelerServer, did, tag string) {
+		for i := 1; i <= 5; i++ {
+			frame := &atproto.LabelSubscribeLabels_Labels{
+				Labels: []*atproto.LabelDefs_Label{
+					{
+						Src: did,
+						Uri: fmt.Sprintf("at://did:plc:user/app.bsky.feed.post/%s%d", tag, i),
+						Val: tag,
+						Cts: time.Now().UTC().Format(time.RFC3339),
+					},
 				},
-			},
-			Seq: int64(i),
-		}
-		if err := fakeServerSlow.sendFrame(frame); err != nil {
-			t.Fatalf("failed to send slow frame %d: %v", i, err)
-		}
-	}
-
-	// Send 5 frames from fast server (should ingest quickly).
-	for i := 1; i <= 5; i++ {
-		frame := &atproto.LabelSubscribeLabels_Labels{
-			Labels: []*atproto.LabelDefs_Label{
-				{
-					Src: labelerFast.DID,
-					Uri: fmt.Sprintf("at://did:plc:user/app.bsky.feed.post/fast%d", i),
-					Val: "fast",
-					Cts: time.Now().UTC().Format(time.RFC3339),
-				},
-			},
-			Seq: int64(i),
-		}
-		if err := fakeServerFast.sendFrame(frame); err != nil {
-			t.Fatalf("failed to send fast frame %d: %v", i, err)
+				Seq: int64(i),
+			}
+			if err := srv.sendFrame(frame); err != nil {
+				t.Errorf("failed to send %s frame %d: %v", tag, i, err)
+				return
+			}
 		}
 	}
 
-	// Wait for both labelers to ingest all 5 frames.
-	// With per-sec limiter of 1, both should complete in ~5 seconds.
-	start := time.Now()
-	ticker := time.NewTicker(50 * time.Millisecond)
+	// Saturate first so its goroutine is busy waiting on its own limiter while
+	// the free labeler streams.
+	sendFrames(fakeServerSaturated, labelerSaturated.DID, "sat")
+	sendFrames(fakeServerFree, labelerFree.DID, "free")
+
+	// Wait until the FREE labeler has ingested all 5 frames. It must not be
+	// blocked behind the saturated labeler's throttle.
+	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
-
-	bothIngestedAll5 := false
-	for !bothIngestedAll5 {
+	for countEvents(t, testStore, labelerFree.DID) < 5 {
 		select {
 		case <-ctx.Done():
-			t.Fatalf("timeout waiting for both labelers to ingest 5 frames each")
+			t.Fatalf("timeout: free labeler did not ingest 5 frames (got %d); isolation broken",
+				countEvents(t, testStore, labelerFree.DID))
 		case <-ticker.C:
-			fastRows, err := testStore.DB().QueryContext(context.Background(),
-				`SELECT COUNT(*) FROM events WHERE labeler_did = ?`, labelerFast.DID)
-			if err != nil {
-				t.Fatalf("failed to query fast labeler count: %v", err)
-			}
-
-			var fastCount int64
-			if fastRows.Next() {
-				if err := fastRows.Scan(&fastCount); err != nil {
-					fastRows.Close()
-					t.Fatalf("failed to scan fast count: %v", err)
-				}
-			}
-			fastRows.Close()
-
-			slowRows, err := testStore.DB().QueryContext(context.Background(),
-				`SELECT COUNT(*) FROM events WHERE labeler_did = ?`, labelerSlow.DID)
-			if err != nil {
-				t.Fatalf("failed to query slow labeler count: %v", err)
-			}
-
-			var slowCount int64
-			if slowRows.Next() {
-				if err := slowRows.Scan(&slowCount); err != nil {
-					slowRows.Close()
-					t.Fatalf("failed to scan slow count: %v", err)
-				}
-			}
-			slowRows.Close()
-
-			if fastCount >= 5 && slowCount >= 5 {
-				bothIngestedAll5 = true
-			}
 		}
 	}
 
-	elapsed := time.Since(start)
-
-	if elapsed > 7*time.Second {
-		t.Logf("warning: took %v to ingest 5 frames each; expected ~5s for 1/sec limits", elapsed)
+	// At the instant the free labeler finished, the saturated labeler (1/sec)
+	// cannot have delivered all 5 — it is still throttled in its own goroutine.
+	// This is the isolation proof: throttling one upstream did not block the other.
+	satCount := countEvents(t, testStore, labelerSaturated.DID)
+	if satCount >= 5 {
+		t.Errorf("saturated labeler should still be throttled (<5) when free labeler finished, got %d", satCount)
 	}
 
-	// Count events per labeler.
-	rows, err := testStore.DB().QueryContext(context.Background(),
-		`SELECT labeler_did, COUNT(*) FROM events GROUP BY labeler_did`)
-	if err != nil {
-		t.Fatalf("failed to query events: %v", err)
-	}
-	defer rows.Close()
-
-	counts := make(map[string]int64)
-	for rows.Next() {
-		var did string
-		var count int64
-		if err := rows.Scan(&did, &count); err != nil {
-			t.Fatalf("failed to scan: %v", err)
-		}
-		counts[did] = count
-	}
-
-	if rows.Err() != nil {
-		t.Fatalf("error iterating rows: %v", rows.Err())
-	}
-
-	// Both labelers should have ingested all 5 frames (isolation: they don't interfere).
-	// With a per-sec limiter of 1/sec applied to each independently, both can complete
-	// 5 frames in ~5 seconds without one starving the other.
-	if counts[labelerFast.DID] != 5 {
-		t.Errorf("fast labeler should have ingested exactly 5 frames, got %d", counts[labelerFast.DID])
-	}
-
-	if counts[labelerSlow.DID] != 5 {
-		t.Errorf("slow labeler should have ingested exactly 5 frames, got %d", counts[labelerSlow.DID])
-	}
-
-	t.Logf("Both labelers ingested 5 frames (isolation confirmed: each has independent limiter)")
-
-	// Verify the timing: with 1/sec limit, 5 frames should take ~5 seconds.
-	if elapsed < 4*time.Second {
-		t.Logf("warning: completed faster than expected for 1/sec limit; took %v for 5 frames", elapsed)
-	}
+	t.Logf("isolation confirmed: free labeler ingested 5 while saturated was at %d", satCount)
 }
 
 // TestSlurperReconcileIsIdempotent verifies that calling Reconcile twice
