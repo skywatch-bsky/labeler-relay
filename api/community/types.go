@@ -25,9 +25,9 @@ type LabelerSyncSubscribeLabelers_Labels struct {
 // signature fidelity; service records are advisory metadata, not signed labels.
 // Only labels are byte-faithful in this relay.
 type LabelerSyncSubscribeLabelers_Service struct {
-	Seq    int64                 `json:"seq" cborgen:"seq"`
-	Src    string                `json:"src" cborgen:"src"`
-	Record *bsky.LabelerService  `json:"record" cborgen:"record"`
+	Seq    int64                `json:"seq" cborgen:"seq"`
+	Src    string               `json:"src" cborgen:"src"`
+	Record *bsky.LabelerService `json:"record" cborgen:"record"`
 }
 
 // LabelerSyncSubscribeLabelers_Info is the #info variant (e.g. OutdatedCursor).
