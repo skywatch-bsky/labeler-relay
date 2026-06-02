@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 type Labeler struct {
@@ -239,5 +240,24 @@ func (r *LabelerRegistry) WriteCursor(ctx context.Context, did string, seq int64
 		return fmt.Errorf("labeler not found: %s", did)
 	}
 
+	return nil
+}
+
+// RecordError records or updates an error message for a labeler.
+// For fresh labelers (not yet in the registry), inserts a minimal row with source='firehose', enabled=0.
+// For existing labelers, updates only last_error and updated_at, preserving source and enabled.
+// This ensures manual labelers remain sticky even when discovery encounters errors.
+func (r *LabelerRegistry) RecordError(ctx context.Context, did, msg string) error {
+	query := `
+		INSERT INTO labelers(did, endpoint, last_error, source, enabled, updated_at)
+		VALUES (?, '', ?, 'firehose', 0, ?)
+		ON CONFLICT(did) DO UPDATE SET
+			last_error = excluded.last_error,
+			updated_at = excluded.updated_at
+	`
+	_, err := r.store.DB().ExecContext(ctx, query, did, msg, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("failed to record error: %w", err)
+	}
 	return nil
 }

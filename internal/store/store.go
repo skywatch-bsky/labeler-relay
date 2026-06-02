@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -40,4 +41,30 @@ func (s *Store) Close() error {
 
 func (s *Store) DB() *sql.DB {
 	return s.db
+}
+
+// GetMeta retrieves a metadata value by key.
+// Returns (value, found, error).
+func (s *Store) GetMeta(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to get meta: %w", err)
+	}
+	return value, true, nil
+}
+
+// SetMeta stores a metadata key-value pair.
+// Uses INSERT ... ON CONFLICT to handle both insert and update.
+func (s *Store) SetMeta(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx,
+		"INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+		key, value)
+	if err != nil {
+		return fmt.Errorf("failed to set meta: %w", err)
+	}
+	return nil
 }
