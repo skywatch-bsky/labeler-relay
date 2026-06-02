@@ -11,6 +11,11 @@ import (
 	"github.com/bluesky-social/indigo/atproto/syntax"
 )
 
+// subscribeLabelsPath is the XRPC path for the labeler subscription endpoint.
+// AT Protocol labelers advertise only a base serviceEndpoint in their DID docs;
+// the subscription path is appended by convention.
+const subscribeLabelsPath = "/xrpc/com.atproto.label.subscribeLabels"
+
 // ErrNoLabelerEndpoint is returned when a DID document lacks an atproto_labeler service endpoint.
 var ErrNoLabelerEndpoint = fmt.Errorf("no atproto_labeler service endpoint in DID document")
 
@@ -30,7 +35,10 @@ func NewIndigoResolver(r identity.Resolver) DIDResolver {
 	return &indigoResolver{inner: r}
 }
 
-// LabelerEndpoint resolves the atproto_labeler service endpoint for a DID.
+// LabelerEndpoint resolves the atproto_labeler service endpoint for a DID and
+// returns the full subscribeLabels WebSocket subscription URL. AT Protocol
+// labelers advertise only a base serviceEndpoint (e.g. "https://mod.bsky.app")
+// in their DID documents; this method appends the XRPC subscription path.
 func (r *indigoResolver) LabelerEndpoint(ctx context.Context, did string) (string, error) {
 	// Resolve the DID document.
 	didDoc, err := r.inner.ResolveDID(ctx, syntax.DID(did))
@@ -39,18 +47,32 @@ func (r *indigoResolver) LabelerEndpoint(ctx context.Context, did string) (strin
 	}
 
 	// Find the atproto_labeler service.
-	// Match on Type="atproto_labeler" as primary, or ID containing "#atproto_labeler" as fallback.
+	// Match on Type="AtprotoLabeler" as primary, or ID containing "#atproto_labeler" as fallback.
+	var base string
 	for _, svc := range didDoc.Service {
-		if svc.Type == "atproto_labeler" {
-			return svc.ServiceEndpoint, nil
+		if svc.Type == "AtprotoLabeler" || svc.Type == "atproto_labeler" {
+			base = svc.ServiceEndpoint
+			break
 		}
 	}
-	for _, svc := range didDoc.Service {
-		if strings.Contains(svc.ID, "#atproto_labeler") {
-			return svc.ServiceEndpoint, nil
+	if base == "" {
+		for _, svc := range didDoc.Service {
+			if strings.Contains(svc.ID, "#atproto_labeler") {
+				base = svc.ServiceEndpoint
+				break
+			}
 		}
+	}
+	if base == "" {
+		return "", ErrNoLabelerEndpoint
 	}
 
-	// No atproto_labeler service found.
-	return "", ErrNoLabelerEndpoint
+	// Append the subscribeLabels XRPC path if not already present.
+	// The DID doc serviceEndpoint is a base URL; callers (slurper) expect the
+	// full path so they can directly dial after scheme conversion.
+	if !strings.HasSuffix(base, subscribeLabelsPath) {
+		base = strings.TrimRight(base, "/") + subscribeLabelsPath
+	}
+
+	return base, nil
 }

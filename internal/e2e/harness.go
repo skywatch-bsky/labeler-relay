@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -203,28 +202,30 @@ func (h *Harness) CollectWithCursor(ctx context.Context, n int, cursor int64) ([
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial relay WebSocket: %w", err)
 	}
-	defer conn.Close()
+
+	// Close the connection when the context or the collect timeout fires.
+	// This unblocks ReadMessage rather than using per-read deadlines, which
+	// cause gorilla to mark the connection as failed after the first timeout.
+	collectCtx, collectCancel := context.WithTimeout(ctx, collectTimeout)
+	defer collectCancel()
+	go func() {
+		<-collectCtx.Done()
+		conn.Close()
+	}()
 
 	var collected []CollectedLabel
-	timeoutAt := time.Now().Add(collectTimeout)
 
 	for len(collected) < n {
-		if time.Now().After(timeoutAt) {
-			return nil, fmt.Errorf("collect: timeout waiting for %d labels: got %d after %v",
-				n, len(collected), collectTimeout)
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			if isTimeout(err) {
-				continue
+			// If the collect context is done (deadline or parent cancelled),
+			// report a meaningful error.
+			if collectCtx.Err() != nil {
+				if len(collected) < n {
+					return nil, fmt.Errorf("collect: timeout waiting for %d labels: got %d after %v",
+						n, len(collected), collectTimeout)
+				}
+				return collected, nil
 			}
 			return nil, fmt.Errorf("collect: WebSocket read error: %w", err)
 		}
@@ -262,28 +263,26 @@ func (h *Harness) CollectAny(ctx context.Context, n int) ([]Frame, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial relay WebSocket: %w", err)
 	}
-	defer conn.Close()
+
+	// Close the connection when the context or collect timeout fires.
+	collectCtx, collectCancel := context.WithTimeout(ctx, collectTimeout)
+	defer collectCancel()
+	go func() {
+		<-collectCtx.Done()
+		conn.Close()
+	}()
 
 	var frames []Frame
-	timeoutAt := time.Now().Add(collectTimeout)
 
 	for len(frames) < n {
-		if time.Now().After(timeoutAt) {
-			return nil, fmt.Errorf("collect-any: timeout waiting for %d frames: got %d after %v",
-				n, len(frames), collectTimeout)
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			if isTimeout(err) {
-				continue
+			if collectCtx.Err() != nil {
+				if len(frames) < n {
+					return nil, fmt.Errorf("collect-any: timeout waiting for %d frames: got %d after %v",
+						n, len(frames), collectTimeout)
+				}
+				return frames, nil
 			}
 			return nil, fmt.Errorf("collect-any: WebSocket read error: %w", err)
 		}
@@ -507,11 +506,3 @@ func freeLocalAddr() (string, error) {
 	return addr, nil
 }
 
-// isTimeout reports whether err is a network timeout.
-func isTimeout(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "timeout") ||
-		strings.Contains(err.Error(), "deadline exceeded")
-}
