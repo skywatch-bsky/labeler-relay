@@ -246,6 +246,35 @@ func (p *LabelPersist) CursorStatus(ctx context.Context, cursor int64) (CursorSt
 	return CursorOK, nil
 }
 
+// Prune deletes all events with ingest_ts < olderThanMillis.
+// Returns the number of rows deleted and the new retention floor.
+// AC6.1: Events older than the configured window are pruned and the retention floor advances.
+// AC6.2: Both #labels and #service events are subject to the same window (no kind filter).
+// AC3.3: AUTOINCREMENT guarantees seq never reuses after prune, even after restart.
+func (p *LabelPersist) Prune(ctx context.Context, olderThanMillis int64) (deleted int64, newFloor int64, err error) {
+	// Delete all events older than cutoff
+	result, err := p.store.DB().ExecContext(ctx,
+		`DELETE FROM events WHERE ingest_ts < ?`,
+		olderThanMillis,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to prune events: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to check rows affected: %w", err)
+	}
+
+	// Query the new floor
+	newFloor, err = p.RetentionFloor(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return affected, newFloor, nil
+}
+
 // timestampMs returns current time in milliseconds since epoch.
 func timestampMs() int64 {
 	return time.Now().UnixMilli()
