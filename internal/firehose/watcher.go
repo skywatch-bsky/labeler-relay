@@ -96,10 +96,19 @@ func (w *FirehoseWatcher) Run(ctx context.Context) error {
 // dial establishes a WebSocket connection and processes commits.
 func (w *FirehoseWatcher) dial(ctx context.Context) error {
 	// Build the subscription URL.
-	// TODO (Phase 6): Read and persist firehose cursor for crash-resume.
 	u, err := url.Parse(w.url)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Read persisted firehose cursor if present.
+	if cursorStr, found, err := w.store.GetMeta(ctx, "firehose_cursor"); err == nil && found {
+		q := u.Query()
+		q.Set("cursor", cursorStr)
+		u.RawQuery = q.Encode()
+	} else if err != nil {
+		w.log.Error("failed to read firehose cursor", "err", err)
+		// Continue without cursor on error; next dial will attempt again.
 	}
 
 	// Dial the WebSocket.
@@ -136,7 +145,7 @@ func (w *FirehoseWatcher) handleEvent(ctx context.Context, evt *stream.XRPCStrea
 // handleCommit processes a commit event from the firehose.
 func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) error {
 	// Extract labeler.service ops from the commit.
-	ops, err := ExtractLabelerServiceOps(commit)
+	ops, err := ExtractLabelerServiceOps(ctx, commit)
 	if err != nil {
 		w.log.Error("extract failed", "err", err)
 		// Record the error but don't crash.
@@ -154,18 +163,10 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				if err == ErrNoLabelerEndpoint {
 					w.log.Debug("no labeler endpoint", "did", op.RepoDID)
 					// Record the error in the registry and continue.
-					_ = w.registry.Upsert(ctx, store.Labeler{
-						DID:       op.RepoDID,
-						LastError: "no atproto_labeler service endpoint",
-						UpdatedAt: time.Now().Unix(),
-					})
+					_ = w.registry.RecordError(ctx, op.RepoDID, "no atproto_labeler service endpoint")
 				} else {
 					w.log.Error("resolve endpoint failed", "did", op.RepoDID, "err", err)
-					_ = w.registry.Upsert(ctx, store.Labeler{
-						DID:       op.RepoDID,
-						LastError: err.Error(),
-						UpdatedAt: time.Now().Unix(),
-					})
+					_ = w.registry.RecordError(ctx, op.RepoDID, err.Error())
 				}
 				continue
 			}
@@ -204,7 +205,11 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 		}
 	}
 
-	// TODO (Phase 6): Persist the firehose cursor for crash-resume.
+	// Persist the firehose cursor for recovery on restart.
+	if err := w.store.SetMeta(ctx, "firehose_cursor", fmt.Sprint(commit.Seq)); err != nil {
+		w.log.Error("failed to persist firehose cursor", "seq", commit.Seq, "err", err)
+		// Don't fail the entire commit handler on cursor persistence error.
+	}
 
 	return nil
 }
