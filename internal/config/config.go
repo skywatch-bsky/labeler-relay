@@ -57,8 +57,8 @@ func Load() (Config, error) {
 
 	// Parse rate limits.
 	cfg.UpstreamRateLimit = RateLimit{
-		PerSec:  parseIntOr("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC", 50),
-		PerHour: parseIntOr("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR", 10000),
+		PerSec:  parseIntOr("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC", 500),
+		PerHour: parseIntOr("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR", 100000),
 	}
 
 	if err := validate(cfg); err != nil {

@@ -25,8 +25,8 @@ func TestLoad_Defaults(t *testing.T) {
 	require.Equal(t, 14*24*time.Hour, cfg.RetentionWindow)
 	require.True(t, cfg.AutoSubscribeDiscovered, "auto_subscribe_discovered should default to true")
 	require.True(t, cfg.RequireSig, "require_sig should default to true")
-	require.Equal(t, 50, cfg.UpstreamRateLimit.PerSec)
-	require.Equal(t, 10000, cfg.UpstreamRateLimit.PerHour)
+	require.Equal(t, 500, cfg.UpstreamRateLimit.PerSec)
+	require.Equal(t, 100000, cfg.UpstreamRateLimit.PerHour)
 }
 
 // TestLoad_EnvOverrides verifies that all fields can be overridden via env vars.

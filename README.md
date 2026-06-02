@@ -35,8 +35,8 @@ All configuration is via environment variables, prefixed `LABELER_RELAY_`.
 | `LABELER_RELAY_RETENTION_WINDOW` | `336h` (14 days) | How long events are kept. Supports Go durations and `Nd` shorthand (e.g. `7d`). |
 | `LABELER_RELAY_REQUIRE_SIG` | `true` | Drop unsigned labels by default. Per-labeler overrides are possible. |
 | `LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED` | `true` | Auto-enable labelers discovered via firehose. |
-| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC` | `50` | Per-labeler ingest rate limit (labels/sec). |
-| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR` | `10000` | Per-labeler ingest rate limit (labels/hour). |
+| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC` | `500` | Per-labeler ingest rate limit (labels/sec). |
+| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR` | `100000` | Per-labeler ingest rate limit (labels/hour). |
 
 ## Endpoints
 
