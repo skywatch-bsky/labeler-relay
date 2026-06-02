@@ -6,3 +6,5 @@
 *.test
 /tmp/
 **/testdata/rapid/
+utils/node_modules/
+*.csv

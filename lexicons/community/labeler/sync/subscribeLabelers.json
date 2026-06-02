@@ -33,8 +33,8 @@
     },
     "labels": {
       "type": "object",
-      "description": "A batch of labels relayed from an upstream labeler, carrying the relay-minted seq. Label bytes (including sig) are byte-faithful to the upstream frame.",
-      "required": ["seq", "src", "labels"],
+      "description": "A batch of labels relayed from an upstream labeler. Each label is a full com.atproto.label.defs#label record passed through byte-faithfully (including sig). The upstreamSeq is the sequence number from the origin labeler's subscribeLabels stream.",
+      "required": ["seq", "src", "upstreamSeq", "labels"],
       "properties": {
         "seq": {
           "type": "integer",
@@ -45,8 +45,13 @@
           "format": "did",
           "description": "DID of the origin labeler these labels came from."
         },
+        "upstreamSeq": {
+          "type": "integer",
+          "description": "Sequence number from the origin labeler's com.atproto.label.subscribeLabels stream."
+        },
         "labels": {
           "type": "array",
+          "description": "Full com.atproto.label.defs#label records, byte-faithful to upstream.",
           "items": {
             "type": "ref",
             "ref": "com.atproto.label.defs#label"
@@ -56,8 +61,8 @@
     },
     "service": {
       "type": "object",
-      "description": "A labeler service record (full app.bsky.labeler.service) observed via discovery, carrying the relay-minted seq.",
-      "required": ["seq", "src", "record"],
+      "description": "A labeler service record observed via firehose discovery, carrying the relay-minted seq and the firehose operation type.",
+      "required": ["seq", "src", "op"],
       "properties": {
         "seq": {
           "type": "integer",
@@ -68,9 +73,15 @@
           "format": "did",
           "description": "DID of the labeler whose service record this is."
         },
+        "op": {
+          "type": "string",
+          "description": "The firehose operation that triggered this event.",
+          "knownValues": ["create", "update", "delete"]
+        },
         "record": {
           "type": "ref",
-          "ref": "app.bsky.labeler.service"
+          "ref": "app.bsky.labeler.service",
+          "description": "The full app.bsky.labeler.service record. Present for create/update ops, absent for delete."
         }
       }
     },

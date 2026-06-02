@@ -10,13 +10,14 @@ import (
 	"github.com/scarndp/labeler-relay/api/community"
 )
 
-// EncodeLabelsFrame builds a #labels output body carrying the relay seq and
-// byte-faithful upstream labels, and returns its CBOR bytes.
-func EncodeLabelsFrame(seq int64, src string, labels []*comatproto.LabelDefs_Label) ([]byte, error) {
+// EncodeLabelsFrame builds a #labels output body carrying the relay seq,
+// upstream seq, and byte-faithful upstream labels, and returns its CBOR bytes.
+func EncodeLabelsFrame(seq int64, src string, upstreamSeq int64, labels []*comatproto.LabelDefs_Label) ([]byte, error) {
 	frame := &community.LabelerSyncSubscribeLabelers_Labels{
-		Seq:    seq,
-		Src:    src,
-		Labels: labels,
+		Seq:         seq,
+		Src:         src,
+		UpstreamSeq: upstreamSeq,
+		Labels:      labels,
 	}
 
 	var buf bytes.Buffer
@@ -37,10 +38,11 @@ func DecodeLabelsFrame(data []byte) (*community.LabelerSyncSubscribeLabelers_Lab
 }
 
 // EncodeServiceFrame builds a #service output body and returns its CBOR bytes.
-func EncodeServiceFrame(seq int64, src string, rec *bsky.LabelerService) ([]byte, error) {
+func EncodeServiceFrame(seq int64, src string, op string, rec *bsky.LabelerService) ([]byte, error) {
 	frame := &community.LabelerSyncSubscribeLabelers_Service{
 		Seq:    seq,
 		Src:    src,
+		Op:     op,
 		Record: rec,
 	}
 

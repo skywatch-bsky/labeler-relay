@@ -30,7 +30,8 @@ type IngestEvent struct {
 	LabelerDID  string
 	UpstreamSeq *int64
 	Labels      []*comatproto.LabelDefs_Label // for kind="labels"
-	Record      *bsky.LabelerService          // for kind="service"
+	Op          string                        // for kind="service": "create" | "update" | "delete"
+	Record      *bsky.LabelerService          // for kind="service" (nil for delete)
 }
 
 // LiveEvent is what the broadcaster delivers to live subscribers. It carries
@@ -117,13 +118,17 @@ func (p *LabelPersist) PersistIngest(ctx context.Context, e IngestEvent) (relayS
 	var frameBytes []byte
 	switch e.Kind {
 	case "labels":
-		frameBytes, err = EncodeLabelsFrame(relaySeq, e.LabelerDID, e.Labels)
+		var upSeq int64
+		if e.UpstreamSeq != nil {
+			upSeq = *e.UpstreamSeq
+		}
+		frameBytes, err = EncodeLabelsFrame(relaySeq, e.LabelerDID, upSeq, e.Labels)
 		if err != nil {
 			return 0, fmt.Errorf("failed to encode labels frame: %w", err)
 		}
 
 	case "service":
-		frameBytes, err = EncodeServiceFrame(relaySeq, e.LabelerDID, e.Record)
+		frameBytes, err = EncodeServiceFrame(relaySeq, e.LabelerDID, e.Op, e.Record)
 		if err != nil {
 			return 0, fmt.Errorf("failed to encode service frame: %w", err)
 		}

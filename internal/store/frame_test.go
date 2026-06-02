@@ -37,8 +37,10 @@ func TestFrameEncodeDecodeRoundtrip(t *testing.T) {
 			}
 		}
 
+		upstreamSeq := rapid.Int64Min(1).Draw(t, "upstreamSeq")
+
 		// Encode
-		encoded, err := EncodeLabelsFrame(seq, src, labels)
+		encoded, err := EncodeLabelsFrame(seq, src, upstreamSeq, labels)
 		require.NoError(t, err)
 		require.NotEmpty(t, encoded)
 
@@ -46,9 +48,10 @@ func TestFrameEncodeDecodeRoundtrip(t *testing.T) {
 		decoded, err := DecodeLabelsFrame(encoded)
 		require.NoError(t, err)
 
-		// Verify seq and src preserved
+		// Verify seq, src, and upstreamSeq preserved
 		require.Equal(t, seq, decoded.Seq)
 		require.Equal(t, src, decoded.Src)
+		require.Equal(t, upstreamSeq, decoded.UpstreamSeq)
 		require.Equal(t, len(labels), len(decoded.Labels))
 
 		// Verify Sig bytes are byte-faithful (roundtrip property for non-empty sigs).
@@ -87,7 +90,8 @@ func TestFrameEncodeDecodeLabels(t *testing.T) {
 		},
 	}
 
-	encoded, err := EncodeLabelsFrame(seq, src, labels)
+	upstreamSeq := int64(99)
+	encoded, err := EncodeLabelsFrame(seq, src, upstreamSeq, labels)
 	require.NoError(t, err)
 	require.NotEmpty(t, encoded)
 
@@ -96,6 +100,7 @@ func TestFrameEncodeDecodeLabels(t *testing.T) {
 
 	require.Equal(t, seq, decoded.Seq)
 	require.Equal(t, src, decoded.Src)
+	require.Equal(t, upstreamSeq, decoded.UpstreamSeq)
 	require.Len(t, decoded.Labels, 1)
 
 	label := decoded.Labels[0]
@@ -118,7 +123,8 @@ func TestFrameEncodeDecodeService(t *testing.T) {
 		Policies:  &bsky.LabelerDefs_LabelerPolicies{},
 	}
 
-	encoded, err := EncodeServiceFrame(seq, src, rec)
+	op := "create"
+	encoded, err := EncodeServiceFrame(seq, src, op, rec)
 	require.NoError(t, err)
 	require.NotEmpty(t, encoded)
 
@@ -127,6 +133,7 @@ func TestFrameEncodeDecodeService(t *testing.T) {
 
 	require.Equal(t, seq, decoded.Seq)
 	require.Equal(t, src, decoded.Src)
+	require.Equal(t, op, decoded.Op)
 	require.NotNil(t, decoded.Record)
 	require.Equal(t, "2026-06-01T00:00:00Z", decoded.Record.CreatedAt)
 }
@@ -154,7 +161,7 @@ func TestFrameEmptyLabels(t *testing.T) {
 	src := "did:plc:test"
 	labels := []*comatproto.LabelDefs_Label{}
 
-	encoded, err := EncodeLabelsFrame(seq, src, labels)
+	encoded, err := EncodeLabelsFrame(seq, src, 0, labels)
 	require.NoError(t, err)
 	require.NotEmpty(t, encoded)
 

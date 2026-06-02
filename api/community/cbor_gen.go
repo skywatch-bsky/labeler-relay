@@ -28,7 +28,7 @@ func (t *LabelerSyncSubscribeLabelers_Labels) MarshalCBOR(w io.Writer) error {
 
 	cw := cbg.NewCborWriter(w)
 
-	if _, err := cw.Write([]byte{163}); err != nil {
+	if _, err := cw.Write([]byte{164}); err != nil {
 		return err
 	}
 
@@ -102,6 +102,29 @@ func (t *LabelerSyncSubscribeLabelers_Labels) MarshalCBOR(w io.Writer) error {
 		}
 
 	}
+
+	// t.UpstreamSeq (int64) (int64)
+	if len("upstreamSeq") > 8192 {
+		return xerrors.Errorf("Value in field \"upstreamSeq\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("upstreamSeq"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("upstreamSeq")); err != nil {
+		return err
+	}
+
+	if t.UpstreamSeq >= 0 {
+		if err := cw.WriteMajorTypeHeader(cbg.MajUnsignedInt, uint64(t.UpstreamSeq)); err != nil {
+			return err
+		}
+	} else {
+		if err := cw.WriteMajorTypeHeader(cbg.MajNegativeInt, uint64(-t.UpstreamSeq-1)); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -130,7 +153,7 @@ func (t *LabelerSyncSubscribeLabelers_Labels) UnmarshalCBOR(r io.Reader) (err er
 
 	n := extra
 
-	nameBuf := make([]byte, 6)
+	nameBuf := make([]byte, 11)
 	for i := uint64(0); i < n; i++ {
 		nameLen, ok, err := cbg.ReadFullStringIntoBuf(cr, nameBuf, 8192)
 		if err != nil {
@@ -232,6 +255,32 @@ func (t *LabelerSyncSubscribeLabelers_Labels) UnmarshalCBOR(r io.Reader) (err er
 
 				}
 			}
+			// t.UpstreamSeq (int64) (int64)
+		case "upstreamSeq":
+			{
+				maj, extra, err := cr.ReadHeader()
+				if err != nil {
+					return err
+				}
+				var extraI int64
+				switch maj {
+				case cbg.MajUnsignedInt:
+					extraI = int64(extra)
+					if extraI < 0 {
+						return fmt.Errorf("int64 positive overflow")
+					}
+				case cbg.MajNegativeInt:
+					extraI = int64(extra)
+					if extraI < 0 {
+						return fmt.Errorf("int64 negative overflow")
+					}
+					extraI = -1 - extraI
+				default:
+					return fmt.Errorf("wrong type for int64 field: %d", maj)
+				}
+
+				t.UpstreamSeq = int64(extraI)
+			}
 
 		default:
 			// Field doesn't exist on this type, so ignore it
@@ -250,8 +299,36 @@ func (t *LabelerSyncSubscribeLabelers_Service) MarshalCBOR(w io.Writer) error {
 	}
 
 	cw := cbg.NewCborWriter(w)
+	fieldCount := 4
 
-	if _, err := cw.Write([]byte{163}); err != nil {
+	if t.Record == nil {
+		fieldCount--
+	}
+
+	if _, err := cw.Write(cbg.CborEncodeMajorType(cbg.MajMap, uint64(fieldCount))); err != nil {
+		return err
+	}
+
+	// t.Op (string) (string)
+	if len("op") > 8192 {
+		return xerrors.Errorf("Value in field \"op\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("op"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("op")); err != nil {
+		return err
+	}
+
+	if len(t.Op) > 8192 {
+		return xerrors.Errorf("Value in field t.Op was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(t.Op))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string(t.Op)); err != nil {
 		return err
 	}
 
@@ -301,19 +378,22 @@ func (t *LabelerSyncSubscribeLabelers_Service) MarshalCBOR(w io.Writer) error {
 	}
 
 	// t.Record (bsky.LabelerService) (struct)
-	if len("record") > 8192 {
-		return xerrors.Errorf("Value in field \"record\" was too long")
-	}
+	if t.Record != nil {
 
-	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("record"))); err != nil {
-		return err
-	}
-	if _, err := cw.WriteString(string("record")); err != nil {
-		return err
-	}
+		if len("record") > 8192 {
+			return xerrors.Errorf("Value in field \"record\" was too long")
+		}
 
-	if err := t.Record.MarshalCBOR(cw); err != nil {
-		return err
+		if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("record"))); err != nil {
+			return err
+		}
+		if _, err := cw.WriteString(string("record")); err != nil {
+			return err
+		}
+
+		if err := t.Record.MarshalCBOR(cw); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -359,7 +439,18 @@ func (t *LabelerSyncSubscribeLabelers_Service) UnmarshalCBOR(r io.Reader) (err e
 		}
 
 		switch string(nameBuf[:nameLen]) {
-		// t.Seq (int64) (int64)
+		// t.Op (string) (string)
+		case "op":
+
+			{
+				sval, err := cbg.ReadStringWithMax(cr, 8192)
+				if err != nil {
+					return err
+				}
+
+				t.Op = string(sval)
+			}
+			// t.Seq (int64) (int64)
 		case "seq":
 			{
 				maj, extra, err := cr.ReadHeader()

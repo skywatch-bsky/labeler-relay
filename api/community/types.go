@@ -6,28 +6,38 @@ import (
 )
 
 // LabelerSyncSubscribeLabelers_Labels is the #labels variant of the
-// community.labeler.sync.subscribeLabelers output stream. Seq is the
-// relay-minted global sequence; Labels are byte-faithful to upstream.
+// community.labeler.sync.subscribeLabelers output stream.
+//
+// The frame nests the upstream subscribeLabels record so downstream consumers
+// receive self-describing, validatable AT Protocol objects:
+//   - Seq: relay-minted global sequence number
+//   - Src: origin labeler DID
+//   - UpstreamSeq: the seq from the upstream labeler's subscribeLabels stream
+//   - Labels: byte-faithful label records from upstream
 type LabelerSyncSubscribeLabelers_Labels struct {
-	Seq    int64                         `json:"seq" cborgen:"seq"`
-	Src    string                        `json:"src" cborgen:"src"`
-	Labels []*comatproto.LabelDefs_Label `json:"labels" cborgen:"labels"`
+	Seq         int64                         `json:"seq" cborgen:"seq"`
+	Src         string                        `json:"src" cborgen:"src"`
+	UpstreamSeq int64                         `json:"upstreamSeq" cborgen:"upstreamSeq"`
+	Labels      []*comatproto.LabelDefs_Label `json:"labels" cborgen:"labels"`
 }
 
 // LabelerSyncSubscribeLabelers_Service is the #service variant, carrying a
-// full app.bsky.labeler.service record under the relay-minted Seq.
+// full app.bsky.labeler.service record observed via firehose discovery.
 //
-// FIDELITY NOTE: unlike #labels (whose label Sig bytes are passed through
-// verbatim), the #service record is decoded from the firehose CAR into a typed
-// *bsky.LabelerService and RE-ENCODED here. It is therefore NOT byte-faithful
-// to the upstream bytes — it is field-faithful (all fields preserved) but the
-// CBOR encoding may differ. No acceptance criterion requires service-record
-// signature fidelity; service records are advisory metadata, not signed labels.
-// Only labels are byte-faithful in this relay.
+//   - Seq: relay-minted global sequence number
+//   - Src: labeler DID
+//   - Op: firehose operation ("create", "update", "delete")
+//   - Record: full app.bsky.labeler.service record (nil for delete)
+//
+// FIDELITY NOTE: the service record is decoded from the firehose CAR into a
+// typed *bsky.LabelerService and re-encoded here. It is field-faithful but
+// not byte-faithful. No acceptance criterion requires service-record signature
+// fidelity; only labels are byte-faithful.
 type LabelerSyncSubscribeLabelers_Service struct {
 	Seq    int64                `json:"seq" cborgen:"seq"`
 	Src    string               `json:"src" cborgen:"src"`
-	Record *bsky.LabelerService `json:"record" cborgen:"record"`
+	Op     string               `json:"op" cborgen:"op"`
+	Record *bsky.LabelerService `json:"record,omitempty" cborgen:"record,omitempty"`
 }
 
 // LabelerSyncSubscribeLabelers_Info is the #info variant (e.g. OutdatedCursor).

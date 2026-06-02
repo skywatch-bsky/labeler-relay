@@ -229,6 +229,7 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 			_, err = w.persist.PersistIngest(ctx, store.IngestEvent{
 				Kind:       "service",
 				LabelerDID: op.RepoDID,
+				Op:         op.Action,
 				Record:     op.Record,
 			})
 			if err != nil {
