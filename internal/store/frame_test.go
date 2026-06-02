@@ -52,13 +52,20 @@ func TestFrameEncodeDecodeRoundtrip(t *testing.T) {
 		require.Equal(t, len(labels), len(decoded.Labels))
 
 		// Verify Sig bytes are byte-faithful (roundtrip property for non-empty sigs).
-		// Note: CBOR encoding converts empty byte slices to nil on decode, which is
-		// semantically identical but not byte-for-byte. Only test byte-faithfulness
-		// for non-empty signatures (the real case where fidelity matters).
+		// IMPORTANT: CBOR/go-cbor behavior: empty []byte{} encodes and then decodes
+		// as nil (LexBytes(nil)), which is semantically identical but not identical
+		// in identity (nil != []byte{}). This is a known CBOR limitation for empty
+		// byte sequences. For non-empty signatures, roundtrip is byte-faithful.
 		for i, label := range labels {
+			decodedSig := decoded.Labels[i].Sig
 			if len(label.Sig) > 0 {
-				require.Equal(t, []byte(label.Sig), []byte(decoded.Labels[i].Sig),
+				// Non-empty sigs must roundtrip byte-for-byte
+				require.Equal(t, []byte(label.Sig), []byte(decodedSig),
 					"label %d: Sig bytes must match exactly for non-empty signatures", i)
+			} else {
+				// Empty sigs decode to nil (CBOR limitation); assert semantic equivalence
+				require.True(t, len(decodedSig) == 0 || decodedSig == nil,
+					"label %d: empty Sig should decode to nil or empty (CBOR limitation)", i)
 			}
 		}
 	})
