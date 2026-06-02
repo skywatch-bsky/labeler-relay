@@ -16,7 +16,7 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 - **Expects**: Registry returns enabled labelers with valid endpoints. Persist never blocks indefinitely.
 
 ## Dependencies
-- **Uses**: store (LabelPersist, LabelerRegistry, IngestEvent), metrics (direct import in subscription.go for counters), indigo stream/schedulers
+- **Uses**: store (LabelPersist, LabelerRegistry, IngestEvent), indigo stream/schedulers. Metrics decoupled via callback injection (onDropUnsigned, onIngested, onThrottled, onUpstreams — wired from main.go).
 - **Used by**: main.go (Run + Reconcile), firehose (poke triggers Reconcile), admin (poke triggers Reconcile)
 - **Boundary**: Must not import server or admin
 
@@ -37,5 +37,5 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 - `ratelimit.go` - Limiter: sliding window Wait with throttle callback
 
 ## Gotchas
-- `subscription.go` directly imports `internal/metrics` for counter increments. This is an FCIS violation that should eventually be refactored to callback injection.
+- All metrics in subscription.go flow through injected callbacks (onDropUnsigned, onIngested), matching the FCIS callback pattern used across the codebase.
 - The limiter's `Wait` polls at 10ms intervals -- not event-driven. Acceptable for label throughput but would need rework for high-volume use.
