@@ -1,7 +1,6 @@
 package firehose
 
 import (
-	"bytes"
 	"testing"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -9,7 +8,6 @@ import (
 	"github.com/bluesky-social/indigo/lex/util"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multihash"
-	cbg "github.com/whyrusleeping/cbor-gen"
 )
 
 // TestExtractLabelerServiceOpsFilters tests that only app.bsky.labeler.service ops are filtered out.
@@ -41,45 +39,87 @@ func TestExtractLabelerServiceOpsFilters(t *testing.T) {
 	}
 }
 
-// TestExtractLabelerServiceOpsMultipleOps tests extraction with both labeler and non-labeler ops.
-func TestExtractLabelerServiceOpsMultipleOps(t *testing.T) {
-	carData := []byte{1, 0} // Minimal CAR (won't be loaded since no labeler ops)
+// TestExtractLabelerServiceOpsDecodesRecord drives extraction through a REAL CAR:
+// a commit carrying one app.bsky.labeler.service record alongside a non-labeler op.
+// It asserts the labeler op is extracted and its record is decoded with fields intact.
+func TestExtractLabelerServiceOpsDecodesRecord(t *testing.T) {
+	const did = "did:plc:extract-real"
+	svc := &bsky.LabelerService{
+		LexiconTypeID: "app.bsky.labeler.service",
+		CreatedAt:     "2026-06-02T12:00:00Z",
+		Policies: &bsky.LabelerDefs_LabelerPolicies{
+			LabelValues: []*string{strptr("rude")},
+		},
+	}
+	car, recordCID := buildLabelerServiceCAR(t, did, "self", svc)
+	lexCID := util.LexLink(recordCID)
 
 	commit := &comatproto.SyncSubscribeRepos_Commit{
-		Repo:   "did:plc:test",
-		Blocks: carData,
+		Repo:   did,
+		Blocks: car,
 		Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
-			{
-				Action: "create",
-				Path:   "app.bsky.feed.post/post1",
-				Cid:    testCID("post1"),
-			},
-			{
-				Action: "create",
-				Path:   "app.bsky.labeler.service/self",
-				Cid:    testCID("svc"),
-			},
-			{
-				Action: "update",
-				Path:   "app.bsky.feed.post/post2",
-				Cid:    testCID("post2"),
-			},
+			// A non-labeler op that must be ignored (its CID need not resolve).
+			{Action: "create", Path: "app.bsky.feed.post/p1", Cid: testCID("post1")},
+			// The real labeler.service op, resolvable from the CAR by its content CID.
+			{Action: "create", Path: "app.bsky.labeler.service/self", Cid: &lexCID},
 		},
 	}
 
 	ops, err := ExtractLabelerServiceOps(commit)
-	// We expect CAR load error since we're trying to load ops.
-	// But the important thing is the early filtering logic.
 	if err != nil {
-		// Expected: CAR loading failed because carData is invalid.
-		// This is OK—the filtering happened before we tried to load.
-		// Just verify it was the CAR that failed, not path parsing.
-		return
+		t.Fatalf("ExtractLabelerServiceOps: %v", err)
 	}
-
-	// If we get here without error, just verify the filtering worked.
 	if len(ops) != 1 {
-		t.Fatalf("expected 1 op (labeler service), got %d", len(ops))
+		t.Fatalf("expected exactly 1 labeler op, got %d", len(ops))
+	}
+	got := ops[0]
+	if got.RepoDID != did {
+		t.Errorf("RepoDID = %q, want %q", got.RepoDID, did)
+	}
+	if got.Rkey != "self" {
+		t.Errorf("Rkey = %q, want self", got.Rkey)
+	}
+	if got.Action != "create" {
+		t.Errorf("Action = %q, want create", got.Action)
+	}
+	if got.Record == nil {
+		t.Fatal("expected decoded record, got nil")
+	}
+	if got.Record.CreatedAt != "2026-06-02T12:00:00Z" {
+		t.Errorf("record CreatedAt = %q, want 2026-06-02T12:00:00Z", got.Record.CreatedAt)
+	}
+	if got.Record.Policies == nil || len(got.Record.Policies.LabelValues) != 1 ||
+		*got.Record.Policies.LabelValues[0] != "rude" {
+		t.Errorf("record Policies not decoded faithfully: %+v", got.Record.Policies)
+	}
+}
+
+// TestExtractLabelerServiceOpsDelete asserts a delete op yields a LabelerServiceOp
+// with a nil Record (no CAR record to load).
+func TestExtractLabelerServiceOpsDelete(t *testing.T) {
+	const did = "did:plc:extract-delete"
+	// A delete commit still carries a (here minimal but valid) CAR; build one with a
+	// throwaway record so LoadRepoFromCAR succeeds, then reference a delete op.
+	car, _ := buildLabelerServiceCAR(t, did, "self", &bsky.LabelerService{
+		LexiconTypeID: "app.bsky.labeler.service",
+		CreatedAt:     "2026-06-02T00:00:00Z",
+	})
+	commit := &comatproto.SyncSubscribeRepos_Commit{
+		Repo:   did,
+		Blocks: car,
+		Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
+			{Action: "delete", Path: "app.bsky.labeler.service/self", Cid: nil},
+		},
+	}
+	ops, err := ExtractLabelerServiceOps(commit)
+	if err != nil {
+		t.Fatalf("ExtractLabelerServiceOps: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 delete op, got %d", len(ops))
+	}
+	if ops[0].Action != "delete" || ops[0].Record != nil {
+		t.Errorf("delete op = %+v, want Action=delete Record=nil", ops[0])
 	}
 }
 
@@ -103,49 +143,31 @@ func TestExtractLabelerServiceOpsEmptyOps(t *testing.T) {
 	}
 }
 
-// TestExtractLabelerServiceOpsPathParsing tests path parsing.
+// TestExtractLabelerServiceOpsPathParsing asserts the rkey is parsed from the op
+// Path through a real CAR-backed extraction (not a non-"self" rkey).
 func TestExtractLabelerServiceOpsPathParsing(t *testing.T) {
-	carData := []byte{1, 0}
+	const did = "did:plc:rkey-parse"
+	svc := &bsky.LabelerService{LexiconTypeID: "app.bsky.labeler.service", CreatedAt: "2026-06-02T00:00:00Z"}
+	car, recordCID := buildLabelerServiceCAR(t, did, "custom", svc)
+	lexCID := util.LexLink(recordCID)
 
-	// Test with multiple labeler ops and mixed ops.
 	commit := &comatproto.SyncSubscribeRepos_Commit{
-		Repo:   "did:plc:labeler",
-		Blocks: carData,
+		Repo:   did,
+		Blocks: car,
 		Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
-			{
-				Action: "create",
-				Path:   "app.bsky.labeler.service/self",
-				Cid:    testCID("svc1"),
-			},
-			{
-				Action: "create",
-				Path:   "app.bsky.labeler.service/other",
-				Cid:    testCID("svc2"),
-			},
-			{
-				Action: "update",
-				Path:   "app.bsky.feed.post/post1",
-				Cid:    testCID("post1"),
-			},
+			{Action: "create", Path: "app.bsky.labeler.service/custom", Cid: &lexCID},
 		},
 	}
 
 	ops, err := ExtractLabelerServiceOps(commit)
-	// CAR will fail to load, but that's OK—we're testing path filtering.
 	if err != nil {
-		return
+		t.Fatalf("ExtractLabelerServiceOps: %v", err)
 	}
-
-	if len(ops) != 2 {
-		t.Fatalf("expected 2 labeler ops, got %d", len(ops))
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 labeler op, got %d", len(ops))
 	}
-
-	if ops[0].Rkey != "self" {
-		t.Errorf("expected first rkey 'self', got %q", ops[0].Rkey)
-	}
-
-	if ops[1].Rkey != "other" {
-		t.Errorf("expected second rkey 'other', got %q", ops[1].Rkey)
+	if ops[0].Rkey != "custom" {
+		t.Errorf("rkey = %q, want custom", ops[0].Rkey)
 	}
 }
 
@@ -165,31 +187,4 @@ func testCID(id string) *util.LexLink {
 	return &lex
 }
 
-// buildTestCommitCAR builds a real CAR containing a labeler.service record.
-// Used by both extract_test and watcher_test.
-func buildTestCommitCAR(t interface{ Fatalf(string, ...interface{}) }, labelerDID string, action string) []byte {
-	// For now, return a minimal valid CAR. Full CAR construction happens during
-	// the watcher test's extraction—we just need valid CBOR bytes.
-	// The real test validates that the CAR can be loaded and records extracted.
-	svc := &bsky.LabelerService{
-		LexiconTypeID: "app.bsky.labeler.service",
-		CreatedAt:     "2026-06-02T00:00:00Z",
-		Policies: &bsky.LabelerDefs_LabelerPolicies{
-			LabelValueDefinitions: []*comatproto.LabelDefs_LabelValueDefinition{},
-			LabelValues:           []*string{},
-		},
-	}
-
-	// Marshal to CBOR—this becomes the record bytes stored in the CAR.
-	var buf bytes.Buffer
-	cw := cbg.NewCborWriter(&buf)
-	if err := svc.MarshalCBOR(cw); err != nil {
-		t.Fatalf("MarshalCBOR failed: %v", err)
-	}
-
-	// Return the CBOR bytes as CAR Blocks.
-	// In real firehose usage, Blocks is a full CAR file. For testing, we're returning
-	// just the record bytes which is sufficient for the extract logic to work (it loads
-	// the repo from the CAR and reads records by CID).
-	return buf.Bytes()
-}
+// Real CAR fixtures are built by buildLabelerServiceCAR in testhelpers_test.go.
