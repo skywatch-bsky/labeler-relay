@@ -10,6 +10,8 @@ import (
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	bsky "github.com/bluesky-social/indigo/api/bsky"
+	"github.com/bluesky-social/indigo/cmd/relay/stream"
+	"github.com/bluesky-social/indigo/cmd/relay/stream/persist"
 )
 
 // CursorState represents the status of a cursor relative to the retention window.
@@ -62,6 +64,8 @@ func NewLabelPersist(s *Store) *LabelPersist {
 // MUST be non-blocking: it may not stall the write path. It will be called
 // while holding the seq minting mutex, so it must return immediately.
 func (p *LabelPersist) SetBroadcaster(fn func(LiveEvent)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.broadcaster = fn
 }
 
@@ -86,10 +90,7 @@ func (p *LabelPersist) PersistIngest(ctx context.Context, e IngestEvent) (relayS
 	defer tx.Rollback()
 
 	// Step 1: Insert placeholder with empty frame_cbor to reserve the seq
-	upstreamSeq := (*int64)(nil)
-	if e.UpstreamSeq != nil {
-		upstreamSeq = e.UpstreamSeq
-	}
+	upstreamSeq := e.UpstreamSeq
 
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts)
@@ -147,10 +148,11 @@ func (p *LabelPersist) PersistIngest(ctx context.Context, e IngestEvent) (relayS
 	return relaySeq, nil
 }
 
-// Playback queries all events with relay_seq > since in ascending order,
-// invoking cb for each LiveEvent. If cb returns an error, Playback stops early.
+// PlaybackFrames queries all events with relay_seq > since in ascending order,
+// invoking cb for each LiveEvent. If cb returns an error, PlaybackFrames stops early.
 // AC2.2: consumer connecting with cursor=N receives backfill from relay_seq > N.
-func (p *LabelPersist) Playback(ctx context.Context, since int64, cb func(LiveEvent) error) error {
+// This is our primary internal Playback method that drives the Phase-5 seam.
+func (p *LabelPersist) PlaybackFrames(ctx context.Context, since int64, cb func(LiveEvent) error) error {
 	rows, err := p.store.DB().QueryContext(ctx,
 		`SELECT relay_seq, kind, labeler_did, frame_cbor FROM events
 		 WHERE relay_seq > ? ORDER BY relay_seq ASC`,
@@ -279,3 +281,55 @@ func (p *LabelPersist) Prune(ctx context.Context, olderThanMillis int64) (delete
 func timestampMs() int64 {
 	return time.Now().UnixMilli()
 }
+
+// ===== EventPersistence interface implementation =====
+// LabelPersist satisfies the persist.EventPersistence interface to allow
+// it to be passed to indigo's NewEventManager for broadcaster wiring (Phase 5).
+// However, our code drives sequencing via PersistIngest and PlaybackFrames directly,
+// not through EventManager's Persist/Playback.
+
+// Persist satisfies persist.EventPersistence but is not used by EventManager
+// for our label events (EventManager only handles repo append events).
+// We drive persistence via PersistIngest instead.
+func (p *LabelPersist) Persist(ctx context.Context, e *stream.XRPCStreamEvent) error {
+	// LabelPersist does not use EventManager's Persist path.
+	// All label events are ingested via PersistIngest.
+	return nil
+}
+
+// Playback satisfies persist.EventPersistence but takes *stream.XRPCStreamEvent
+// (which label events don't have), unlike our PlaybackFrames which takes LiveEvent.
+// Phase 5 uses PlaybackFrames; this is provided for interface compliance only.
+func (p *LabelPersist) Playback(ctx context.Context, since int64, cb func(*stream.XRPCStreamEvent) error) error {
+	// LabelPersist does not use EventManager's Playback path.
+	// Phase 5 uses PlaybackFrames instead, which operates on our LiveEvent type.
+	return nil
+}
+
+// TakeDownRepo satisfies persist.EventPersistence but is repo-specific and
+// irrelevant for a label relay that has no repo-scoped retention.
+func (p *LabelPersist) TakeDownRepo(ctx context.Context, uid uint64) error {
+	return nil
+}
+
+// Flush satisfies persist.EventPersistence and is a no-op (all writes are
+// immediately flushed via SQLite's COMMIT).
+func (p *LabelPersist) Flush(ctx context.Context) error {
+	return nil
+}
+
+// Shutdown satisfies persist.EventPersistence and is a no-op (Close on
+// the *Store handles shutdown).
+func (p *LabelPersist) Shutdown(ctx context.Context) error {
+	return nil
+}
+
+// SetEventBroadcaster satisfies persist.EventPersistence but LabelPersist
+// uses its own SetBroadcaster method for our LiveEvent type.
+func (p *LabelPersist) SetEventBroadcaster(fn func(*stream.XRPCStreamEvent)) {
+	// LabelPersist uses SetBroadcaster(func(LiveEvent)) instead.
+	// This is provided for interface compliance only.
+}
+
+// Compile assertion that LabelPersist implements persist.EventPersistence.
+var _ persist.EventPersistence = (*LabelPersist)(nil)
