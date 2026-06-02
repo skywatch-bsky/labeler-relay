@@ -81,11 +81,83 @@ func (s *subscription) dial(ctx context.Context) error {
 		return fmt.Errorf("failed to read cursor: %w", err)
 	}
 
-	// Build the subscription URL with cursor parameter.
-	endpoint := s.labeler.Endpoint
+	// No stored cursor: this is a first-time connection. Skip historical
+	// backfill by connecting live-only to discover the current head seq,
+	// then persisting it as the cursor so subsequent dials resume from here.
+	if lastSeq == nil {
+		headSeq, err := s.discoverHead(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to discover head: %w", err)
+		}
+		if err := s.registry.WriteCursor(ctx, s.labeler.DID, headSeq); err != nil {
+			return fmt.Errorf("failed to write initial cursor: %w", err)
+		}
+		s.log.Info("skipped backfill, starting live", "labeler", s.labeler.DID, "cursor", headSeq)
+		lastSeq = &headSeq
+	}
 
-	// Convert HTTP/HTTPS to WS/WSS scheme.
-	u, err := url.Parse(endpoint)
+	return s.dialFrom(ctx, lastSeq)
+}
+
+// discoverHead connects briefly to the upstream labeler with no cursor,
+// reads one frame to learn the current seq, and disconnects. This avoids
+// replaying the labeler's entire history on first subscription.
+func (s *subscription) discoverHead(ctx context.Context) (int64, error) {
+	u, err := url.Parse(s.labeler.Endpoint)
+	if err != nil {
+		return 0, fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	if u.Scheme == "http" {
+		u.Scheme = "ws"
+	} else if u.Scheme == "https" {
+		u.Scheme = "wss"
+	}
+
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to dial for head discovery: %w", err)
+	}
+	defer conn.Close()
+
+	var headSeq int64
+	found := make(chan struct{})
+
+	sched := sequential.NewScheduler(s.labeler.DID, func(ctx context.Context, evt *stream.XRPCStreamEvent) error {
+		cb := &stream.RepoStreamCallbacks{
+			LabelLabels: func(evt *atproto.LabelSubscribeLabels_Labels) error {
+				headSeq = evt.Seq
+				close(found)
+				return fmt.Errorf("head discovered")
+			},
+			LabelInfo: func(evt *atproto.LabelSubscribeLabels_Info) error {
+				return nil
+			},
+			Error: func(evt *stream.ErrorFrame) error {
+				return fmt.Errorf("error during head discovery: %s", evt.Error)
+			},
+		}
+		return cb.EventHandler(ctx, evt)
+	})
+	defer sched.Shutdown()
+
+	go func() {
+		_ = stream.HandleRepoStream(ctx, conn, sched, s.log)
+	}()
+
+	select {
+	case <-found:
+		return headSeq, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-time.After(30 * time.Second):
+		return 0, fmt.Errorf("timeout waiting for first frame from %s", s.labeler.DID)
+	}
+}
+
+// dialFrom connects to the upstream labeler from a known cursor position.
+func (s *subscription) dialFrom(ctx context.Context, lastSeq *int64) error {
+	u, err := url.Parse(s.labeler.Endpoint)
 	if err != nil {
 		return fmt.Errorf("invalid endpoint URL: %w", err)
 	}
@@ -95,32 +167,22 @@ func (s *subscription) dial(ctx context.Context) error {
 		u.Scheme = "wss"
 	}
 
-	// Add cursor parameter if we have a resume point.
 	if lastSeq != nil {
 		q := u.Query()
 		q.Set("cursor", fmt.Sprintf("%d", *lastSeq))
 		u.RawQuery = q.Encode()
 	}
 
-	endpoint = u.String()
-
-	// Dial the WebSocket.
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
-	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to dial: %w", err)
 	}
 	defer conn.Close()
 
-	// Build the frame handler callbacks.
 	sched := sequential.NewScheduler(s.labeler.DID, s.handleEvent)
-
-	// Wrap the scheduler's Shutdown in a deferred call to ensure cleanup.
 	defer sched.Shutdown()
 
-	// Call HandleRepoStream to consume frames.
 	return stream.HandleRepoStream(ctx, conn, sched, s.log)
 }
 

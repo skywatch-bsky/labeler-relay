@@ -50,6 +50,7 @@ func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
+	seedCursor(t, registry, labeler.DID)
 
 	// Create subscription and run it in background.
 	sub := &subscription{
@@ -147,6 +148,7 @@ func TestSubscriptionByteFailfulSigPassthrough(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
+	seedCursor(t, registry, labeler.DID)
 
 	sub := &subscription{
 		labeler:    labeler,
@@ -256,6 +258,7 @@ func TestSubscriptionSourceIsOriginLabeler(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
+	seedCursor(t, registry, labeler.DID)
 
 	sub := &subscription{
 		labeler:    labeler,
@@ -357,6 +360,7 @@ func TestSubscriptionRedialOnServerRestart(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
+	seedCursor(t, registry, labeler.DID)
 
 	sub := &subscription{
 		labeler:    labeler,
@@ -501,6 +505,7 @@ func TestSubscriptionDropsUnsignedLabelsWhenRequireSigTrue(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
+	seedCursor(t, registry, labeler.DID)
 
 	sub := &subscription{
 		labeler:    labeler,
@@ -620,6 +625,7 @@ func TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride(t *testing.
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
+	seedCursor(t, registry, labeler.DID)
 
 	sub := &subscription{
 		labeler:    labeler,
@@ -730,6 +736,7 @@ func TestSubscriptionIncrementsIngestedTotalMetric(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
+	seedCursor(t, registry, labeler.DID)
 
 	sub := &subscription{
 		labeler:    labeler,
@@ -840,6 +847,15 @@ func waitForCondition(ctx context.Context, fn func() (int64, error), minValue in
 				return val, nil
 			}
 		}
+	}
+}
+
+// seedCursor writes an initial cursor for a labeler so that the subscription
+// skips head discovery and starts processing frames immediately.
+func seedCursor(t *testing.T, registry *store.LabelerRegistry, did string) {
+	t.Helper()
+	if err := registry.WriteCursor(context.Background(), did, 0); err != nil {
+		t.Fatalf("failed to seed cursor for %s: %v", did, err)
 	}
 }
 
