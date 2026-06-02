@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { WebSocket } from "ws";
-import { decodeAll } from "@atproto/lex-cbor";
+import { decodeFirst, isBytes, fromBytes, isCidLink } from "@atcute/cbor";
 
 const url =
   process.argv[2] ??
@@ -13,16 +13,22 @@ process.stderr.write(`Connecting to ${connectUrl}...\n`);
 
 const ws = new WebSocket(connectUrl);
 
-ws.on("open", () => {
-  process.stderr.write("Connected.\n");
-});
-
 function toJSON(val: unknown): unknown {
-  if (val instanceof Uint8Array || Buffer.isBuffer(val)) {
-    return { $bytes: Buffer.from(val).toString("base64") };
+  if (isBytes(val)) {
+    const buf = fromBytes(val as any);
+    return { $bytes: Buffer.from(buf).toString("base64") };
+  }
+  if (isCidLink(val)) {
+    return (val as any).toJSON();
   }
   if (Array.isArray(val)) {
     return val.map(toJSON);
+  }
+  if (val instanceof Uint8Array || Buffer.isBuffer(val)) {
+    if (val.length > 1024) {
+      return `<${val.length} bytes>`;
+    }
+    return { $bytes: Buffer.from(val).toString("base64") };
   }
   if (val !== null && typeof val === "object") {
     const out: Record<string, unknown> = {};
@@ -36,12 +42,14 @@ function toJSON(val: unknown): unknown {
   return val;
 }
 
+ws.on("open", () => {
+  process.stderr.write("Connected.\n");
+});
+
 ws.on("message", (data: Buffer) => {
-  const items = Array.from(decodeAll(data));
-  const [header, body] = items as [
-    Record<string, unknown>,
-    Record<string, unknown>,
-  ];
+  const buf = new Uint8Array(data);
+  const [header, remainder] = decodeFirst(buf) as [Record<string, unknown>, Uint8Array];
+  const [body] = decodeFirst(remainder) as [Record<string, unknown>, Uint8Array];
 
   const op = header["op"] as number;
   const rawType = (header["t"] as string) ?? "";
@@ -97,7 +105,7 @@ ws.on("message", (data: Buffer) => {
     }
 
     case "info": {
-      const line = JSON.stringify({ type, ...toJSON(body) as object });
+      const line = JSON.stringify({ type: "info", ...toJSON(body) as object });
       process.stderr.write(`Info: ${line}\n`);
       break;
     }

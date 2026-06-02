@@ -5,7 +5,7 @@
     "stream": "tsx stream-client.ts"
   },
   "dependencies": {
-    "@atproto/lex-cbor": "^0.1.0",
+    "@atcute/cbor": "^2.3.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {

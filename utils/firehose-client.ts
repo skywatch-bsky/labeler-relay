@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { WebSocket } from "ws";
-import { decodeAll } from "@atproto/lex-cbor";
+import { decodeFirst, isBytes, fromBytes, isCidLink } from "@atcute/cbor";
 
 const url =
   process.argv[2] ??
@@ -19,14 +19,24 @@ if (filter) {
 const ws = new WebSocket(connectUrl);
 
 function toJSON(val: unknown): unknown {
+  if (isBytes(val)) {
+    const buf = fromBytes(val as any);
+    if (buf.length > 1024) {
+      return `<${buf.length} bytes>`;
+    }
+    return { $bytes: Buffer.from(buf).toString("base64") };
+  }
+  if (isCidLink(val)) {
+    return (val as any).toJSON();
+  }
+  if (Array.isArray(val)) {
+    return val.map(toJSON);
+  }
   if (val instanceof Uint8Array || Buffer.isBuffer(val)) {
     if (val.length > 1024) {
       return `<${val.length} bytes>`;
     }
     return { $bytes: Buffer.from(val).toString("base64") };
-  }
-  if (Array.isArray(val)) {
-    return val.map(toJSON);
   }
   if (val !== null && typeof val === "object") {
     const out: Record<string, unknown> = {};
@@ -47,11 +57,9 @@ ws.on("open", () => {
 });
 
 ws.on("message", (data: Buffer) => {
-  const items = Array.from(decodeAll(data));
-  const [header, body] = items as [
-    Record<string, unknown>,
-    Record<string, unknown>,
-  ];
+  const buf = new Uint8Array(data);
+  const [header, remainder] = decodeFirst(buf) as [Record<string, unknown>, Uint8Array];
+  const [body] = decodeFirst(remainder) as [Record<string, unknown>, Uint8Array];
 
   const op = header["op"] as number;
   const rawType = (header["t"] as string) ?? "";
