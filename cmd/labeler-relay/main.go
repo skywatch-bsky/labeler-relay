@@ -89,6 +89,12 @@ func run(ctx context.Context) error {
 	sl.SetThrottledCallback(func(did string) {
 		metrics.Throttled.WithLabelValues(did).Inc()
 	})
+	sl.SetDropUnsignedCallback(func(did string) {
+		metrics.DroppedUnsigned.WithLabelValues(did).Inc()
+	})
+	sl.SetIngestedCallback(func(did string, n int) {
+		metrics.IngestedTotal.WithLabelValues(did).Add(float64(n))
+	})
 
 	// poke triggers an immediate Reconcile on the slurper (used by firehose
 	// watcher and admin API to react to registry changes without waiting for

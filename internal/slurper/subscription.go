@@ -15,18 +15,19 @@ import (
 	"github.com/bluesky-social/indigo/cmd/relay/stream"
 	"github.com/bluesky-social/indigo/cmd/relay/stream/schedulers/sequential"
 	"github.com/gorilla/websocket"
-	"github.com/scarndp/labeler-relay/internal/metrics"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
 // subscription owns one labeler's upstream connection lifecycle and frame handling.
 type subscription struct {
-	labeler    store.Labeler
-	persist    *store.LabelPersist
-	registry   *store.LabelerRegistry
-	limiter    *Limiter
-	sigDefault bool
-	log        *slog.Logger
+	labeler         store.Labeler
+	persist         *store.LabelPersist
+	registry        *store.LabelerRegistry
+	limiter         *Limiter
+	sigDefault      bool
+	log             *slog.Logger
+	onDropUnsigned  func(did string)       // called when a label is dropped for missing signature; may be nil
+	onIngested      func(did string, n int) // called after a successful PersistIngest with the count kept; may be nil
 }
 
 // run starts the subscription loop with redial + backoff. It blocks until ctx is cancelled.
@@ -147,7 +148,9 @@ func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.Label
 
 		// Check if we should keep this label.
 		if !KeepLabel(label, sigRequired) {
-			metrics.DroppedUnsigned.WithLabelValues(s.labeler.DID).Inc()
+			if s.onDropUnsigned != nil {
+				s.onDropUnsigned(s.labeler.DID)
+			}
 			continue
 		}
 
@@ -170,8 +173,9 @@ func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.Label
 		return fmt.Errorf("failed to persist labels: %w", err)
 	}
 
-	// Increment ingested metric.
-	metrics.IngestedTotal.WithLabelValues(s.labeler.DID).Add(float64(len(kept)))
+	if s.onIngested != nil {
+		s.onIngested(s.labeler.DID, len(kept))
+	}
 
 	// Write cursor after successful persist (crash-safe ordering).
 	if err := s.registry.WriteCursor(ctx, s.labeler.DID, evt.Seq); err != nil {

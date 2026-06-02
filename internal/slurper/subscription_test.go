@@ -509,6 +509,9 @@ func TestSubscriptionDropsUnsignedLabelsWhenRequireSigTrue(t *testing.T) {
 		limiter:    NewLimiter(1000, 100000),
 		sigDefault: true,
 		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		onDropUnsigned: func(did string) {
+			metrics.DroppedUnsigned.WithLabelValues(did).Inc()
+		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -735,6 +738,9 @@ func TestSubscriptionIncrementsIngestedTotalMetric(t *testing.T) {
 		limiter:    NewLimiter(1000, 100000),
 		sigDefault: true,
 		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		onIngested: func(did string, n int) {
+			metrics.IngestedTotal.WithLabelValues(did).Add(float64(n))
+		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
