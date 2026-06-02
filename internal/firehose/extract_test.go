@@ -1,6 +1,7 @@
 package firehose
 
 import (
+	"context"
 	"testing"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -10,11 +11,11 @@ import (
 	"github.com/multiformats/go-multihash"
 )
 
-// TestExtractLabelerServiceOpsFilters tests that only app.bsky.labeler.service ops are filtered out.
-// This test uses a mock CAR (not a valid one) because it only tests path filtering,
-// not actual record decoding.
+// TestExtractLabelerServiceOpsFilters tests that only app.bsky.labeler.service ops are extracted.
+// The test uses minimal CAR data because extraction returns early when no labeler ops are present,
+// so the CAR is never loaded—only the path filtering guard is exercised.
 func TestExtractLabelerServiceOpsFilters(t *testing.T) {
-	// Use a minimal CAR that won't be loaded (the op is filtered before loading).
+	// Use minimal CAR that won't be loaded (the early-return guard filters ops before CAR load).
 	carData := []byte{1, 0} // minimal CAR header: version 1, 0 roots
 
 	commit := &comatproto.SyncSubscribeRepos_Commit{
@@ -29,7 +30,7 @@ func TestExtractLabelerServiceOpsFilters(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerServiceOps(commit)
+	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("ExtractLabelerServiceOps failed: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestExtractLabelerServiceOpsDecodesRecord(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerServiceOps(commit)
+	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("ExtractLabelerServiceOps: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestExtractLabelerServiceOpsDelete(t *testing.T) {
 			{Action: "delete", Path: "app.bsky.labeler.service/self", Cid: nil},
 		},
 	}
-	ops, err := ExtractLabelerServiceOps(commit)
+	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("ExtractLabelerServiceOps: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestExtractLabelerServiceOpsEmptyOps(t *testing.T) {
 		Ops:    []*comatproto.SyncSubscribeRepos_RepoOp{},
 	}
 
-	ops, err := ExtractLabelerServiceOps(commit)
+	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("ExtractLabelerServiceOps failed: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestExtractLabelerServiceOpsPathParsing(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerServiceOps(commit)
+	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("ExtractLabelerServiceOps: %v", err)
 	}

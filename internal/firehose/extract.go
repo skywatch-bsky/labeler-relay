@@ -27,7 +27,7 @@ type LabelerServiceOp struct {
 // loading record bytes from the commit CAR for create/update.
 //
 // Allocation-light: returns early when no labeler ops are present.
-func ExtractLabelerServiceOps(commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerServiceOp, error) {
+func ExtractLabelerServiceOps(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerServiceOp, error) {
 	if len(commit.Ops) == 0 {
 		return nil, nil
 	}
@@ -81,7 +81,7 @@ func ExtractLabelerServiceOps(commit *comatproto.SyncSubscribeRepos_Commit) ([]L
 			// Load the record from the repo using the CID.
 			// LexLink is a cid.Cid value, we need to cast it.
 			cidVal := cid.Cid(*op.Cid)
-			block, err := repoObj.RecordStore.Get(context.Background(), cidVal)
+			block, err := repoObj.RecordStore.Get(ctx, cidVal)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get block for %s: %w", op.Path, err)
 			}
