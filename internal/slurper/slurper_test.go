@@ -56,11 +56,9 @@ func TestSlurperStartsSubscriptionsForEnabledLabelers(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labelerA); err != nil {
 		t.Fatalf("failed to insert labelerA: %v", err)
 	}
-	seedCursor(t, registry, labelerA.DID)
 	if err := registry.Upsert(context.Background(), labelerB); err != nil {
 		t.Fatalf("failed to insert labelerB: %v", err)
 	}
-	seedCursor(t, registry, labelerB.DID)
 
 	slurper := New(
 		registry,
@@ -179,11 +177,9 @@ func TestSlurperStopsDisabledLabelers(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labelerA); err != nil {
 		t.Fatalf("failed to insert labelerA: %v", err)
 	}
-	seedCursor(t, registry, labelerA.DID)
 	if err := registry.Upsert(context.Background(), labelerB); err != nil {
 		t.Fatalf("failed to insert labelerB: %v", err)
 	}
-	seedCursor(t, registry, labelerB.DID)
 
 	slurper := New(
 		registry,
@@ -367,11 +363,9 @@ func TestSlurperIsolatesRateLimitingPerLabeler(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labelerSaturated); err != nil {
 		t.Fatalf("failed to insert saturated labeler: %v", err)
 	}
-	seedCursor(t, registry, labelerSaturated.DID)
 	if err := registry.Upsert(context.Background(), labelerFree); err != nil {
 		t.Fatalf("failed to insert free labeler: %v", err)
 	}
-	seedCursor(t, registry, labelerFree.DID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -576,7 +570,6 @@ func TestSlurperPokeTriggersReconcile(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
-	seedCursor(t, registry, labeler.DID)
 
 	// Poke to trigger immediate reconcile (don't wait for 10s ticker).
 	sl.Poke()
@@ -622,7 +615,6 @@ func TestSlurperReconcileIsIdempotent(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
-	seedCursor(t, registry, labeler.DID)
 
 	slurper := New(
 		registry,
@@ -701,11 +693,9 @@ func TestSlurperReconcileIsolatesRateLimitingPerLabeler(t *testing.T) {
 	if err := registry.Upsert(context.Background(), labelerA); err != nil {
 		t.Fatalf("failed to insert labelerA: %v", err)
 	}
-	seedCursor(t, registry, labelerA.DID)
 	if err := registry.Upsert(context.Background(), labelerB); err != nil {
 		t.Fatalf("failed to insert labelerB: %v", err)
 	}
-	seedCursor(t, registry, labelerB.DID)
 
 	// Create slurper with a tiny PerSec for labelerA to throttle it;
 	// labelerB will be independent because each subscription gets its own Limiter.
