@@ -149,6 +149,7 @@ type fakeSubscribeReposServer struct {
 	server      *httptest.Server
 	mu          sync.Mutex
 	wsReady     chan struct{}
+	commitSent  chan struct{} // closed once the auto-commit frame is written to the socket
 	dialCursors []string
 	// commitSeqToSend is the Seq to embed in the auto-sent #commit frame.
 	// Set to 0 to skip auto-send.
@@ -159,6 +160,7 @@ func newFakeSubscribeReposServer(t *testing.T, commitSeq int64) *fakeSubscribeRe
 	t.Helper()
 	fs := &fakeSubscribeReposServer{
 		wsReady:         make(chan struct{}),
+		commitSent:      make(chan struct{}),
 		commitSeqToSend: commitSeq,
 	}
 
@@ -177,6 +179,7 @@ func newFakeSubscribeReposServer(t *testing.T, commitSeq int64) *fakeSubscribeRe
 		fs.dialCursors = append(fs.dialCursors, cursor)
 		wsReady := fs.wsReady
 		seq := fs.commitSeqToSend
+		commitSent := fs.commitSent
 		fs.mu.Unlock()
 
 		select {
@@ -190,6 +193,12 @@ func newFakeSubscribeReposServer(t *testing.T, commitSeq int64) *fakeSubscribeRe
 			if err := sendMinimalCommit(ws, seq); err != nil {
 				return
 			}
+			// Signal that the commit was written to the socket.
+			select {
+			case <-commitSent:
+			default:
+				close(commitSent)
+			}
 		}
 
 		// Keep alive until client disconnects.
@@ -202,6 +211,12 @@ func newFakeSubscribeReposServer(t *testing.T, commitSeq int64) *fakeSubscribeRe
 	})
 	fs.server = httptest.NewServer(mux)
 	return fs
+}
+
+func (fs *fakeSubscribeReposServer) commitSentCh() chan struct{} {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.commitSent
 }
 
 // sendMinimalCommit sends a #commit frame with no ops — enough for the watcher
@@ -452,11 +467,17 @@ func TestResumeFirehose(t *testing.T) {
 		func() {},
 		discardLog(),
 	)
+	// Use a flush threshold of 1 so the cursor is written on the very first commit.
+	// This ensures the cursor is persisted before we cancel, without relying on the
+	// deferred flush or the 5-second time window.
+	watcher1.SetCursorFlushThresholds(1, 10*time.Second)
 
 	ctx1, cancel1 := context.WithCancel(context.Background())
+	watcher1Done := make(chan struct{})
 
 	var watcher1Err atomic.Value
 	go func() {
+		defer close(watcher1Done)
 		if err := watcher1.Run(ctx1); err != nil && err != context.Canceled {
 			watcher1Err.Store(err)
 		}
@@ -472,7 +493,9 @@ func TestResumeFirehose(t *testing.T) {
 		}
 	}, "watcher1 connects to fakeServer1")
 
-	// Wait for cursor to be persisted (watcher processes the auto-sent #commit).
+	// Wait for the cursor to be persisted. With flush threshold=1, every commit
+	// is written immediately, so this completes as soon as the auto-sent commit
+	// is processed by the watcher.
 	waitForCond(t, 5000, func() bool {
 		cursorStr, found, err := s.GetMeta(context.Background(), "firehose_cursor")
 		return err == nil && found && cursorStr == fmt.Sprintf("%d", firehoseSeq)
@@ -480,6 +503,13 @@ func TestResumeFirehose(t *testing.T) {
 
 	// Simulate crash: cancel watcher1.
 	cancel1()
+
+	// Wait for watcher1 goroutine to fully stop before starting phase 2.
+	select {
+	case <-watcher1Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher1 did not stop within 5 seconds after cancel")
+	}
 
 	// --- Phase 2: new watcher over same store, new fake subscribeRepos server ---
 

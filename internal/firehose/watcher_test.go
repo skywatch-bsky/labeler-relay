@@ -3,6 +3,7 @@ package firehose
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -208,43 +209,51 @@ func TestWatcherHandleCommitNoEndpoint(t *testing.T) {
 	}
 }
 
-// TestWatcherCursorPersistence asserts that the firehose cursor is persisted
-// after each commit and can be read back from the meta table.
-func TestWatcherCursorPersistence(t *testing.T) {
+// TestWatcherCursorBatching asserts that the firehose cursor is NOT written on
+// every commit (batching reduces write amplification), but IS flushed once the
+// commit-count threshold is reached.
+func TestWatcherCursorBatching(t *testing.T) {
 	t.Parallel()
 
+	const threshold = 5 // small threshold to keep the test fast
 	const did = "did:plc:firehose-cursor-test"
 	const endpoint = "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels"
 
 	w, _, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
+	w.cursorFlushEvery = threshold
+	w.cursorFlushInterval = 10 * time.Second // large interval so only count triggers
+
 	ctx := context.Background()
 
-	// Process first commit with seq=42.
-	if err := w.handleCommit(ctx, serviceCommit(t, did, "create", 42, sampleService("2026-06-02T00:00:00Z"))); err != nil {
-		t.Fatalf("handleCommit(seq=42): %v", err)
+	// Reset lastFlushTime to now so the time-based threshold won't trigger early.
+	w.lastFlushTime = time.Now()
+
+	// Send threshold-1 commits: cursor should NOT be written yet.
+	for i := int64(1); i < threshold; i++ {
+		if err := w.handleCommit(ctx, serviceCommit(t, did, "create", i, sampleService("2026-06-02T00:00:00Z"))); err != nil {
+			t.Fatalf("handleCommit(seq=%d): %v", i, err)
+		}
+	}
+	_, found, err := w.store.GetMeta(ctx, "firehose_cursor")
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if found {
+		t.Error("cursor should NOT be written before reaching the flush threshold")
 	}
 
-	// Assert cursor was persisted.
+	// The threshold-th commit triggers a flush.
+	finalSeq := int64(threshold)
+	if err := w.handleCommit(ctx, serviceCommit(t, did, "update", finalSeq, sampleService("2026-06-02T01:00:00Z"))); err != nil {
+		t.Fatalf("handleCommit(seq=%d): %v", finalSeq, err)
+	}
 	cursor, found, err := w.store.GetMeta(ctx, "firehose_cursor")
 	if err != nil {
 		t.Fatalf("GetMeta: %v", err)
 	}
-	if !found || cursor != "42" {
-		t.Errorf("cursor after seq=42: found=%v cursor=%q, want found=true cursor=42", found, cursor)
-	}
-
-	// Process second commit with seq=100.
-	if err := w.handleCommit(ctx, serviceCommit(t, did, "update", 100, sampleService("2026-06-02T01:00:00Z"))); err != nil {
-		t.Fatalf("handleCommit(seq=100): %v", err)
-	}
-
-	// Assert cursor advanced.
-	cursor, found, err = w.store.GetMeta(ctx, "firehose_cursor")
-	if err != nil {
-		t.Fatalf("GetMeta: %v", err)
-	}
-	if !found || cursor != "100" {
-		t.Errorf("cursor after seq=100: found=%v cursor=%q, want found=true cursor=100", found, cursor)
+	if !found || cursor != fmt.Sprint(finalSeq) {
+		t.Errorf("cursor after %d commits: found=%v cursor=%q, want found=true cursor=%d",
+			threshold, found, cursor, finalSeq)
 	}
 }
 
