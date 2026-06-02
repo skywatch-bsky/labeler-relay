@@ -31,8 +31,10 @@ type LabelSlurper struct {
 	sigDefault            bool
 	limits                LimitConfig
 	log                   *slog.Logger
-	onUpstreamsReconciled func(float64)       // called after Reconcile with the new upstream count
-	onThrottled           func(string)        // called when a labeler is throttled, passed the labeler DID
+	onUpstreamsReconciled func(float64)        // called after Reconcile with the new upstream count
+	onThrottled           func(string)         // called when a labeler is throttled, passed the labeler DID
+	onDropUnsigned        func(string)         // called when a label is dropped for missing signature, passed the labeler DID
+	onIngested            func(string, int)    // called after a successful PersistIngest with labeler DID and count
 
 	mu     sync.Mutex
 	active map[string]*subscriptionContext // keyed by labeler DID
@@ -96,12 +98,14 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 			}
 
 			sub := &subscription{
-				labeler:    labeler,
-				persist:    s.persist,
-				registry:   s.registry,
-				limiter:    limiter,
-				sigDefault: s.sigDefault,
-				log:        s.log,
+				labeler:        labeler,
+				persist:        s.persist,
+				registry:       s.registry,
+				limiter:        limiter,
+				sigDefault:     s.sigDefault,
+				log:            s.log,
+				onDropUnsigned: s.onDropUnsigned,
+				onIngested:     s.onIngested,
 			}
 
 			sc := &subscriptionContext{
@@ -125,8 +129,10 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 	// Cancel subscriptions for disabled labelers.
 	for did, sc := range s.active {
 		if _, isEnabled := enabledSet[did]; !isEnabled {
-			// Labeler is no longer enabled: cancel its subscription.
+			// Labeler is no longer enabled: cancel its subscription and stop the
+			// rate-limiter goroutines to avoid a goroutine leak.
 			sc.cancel()
+			sc.sub.limiter.Close()
 			delete(s.active, did)
 			s.log.Info("stopped subscription", "labeler", did)
 		}
@@ -152,6 +158,22 @@ func (s *LabelSlurper) SetUpstreamsCallback(fn func(float64)) {
 // Prometheus counters without importing metrics from slurper (FCIS).
 func (s *LabelSlurper) SetThrottledCallback(fn func(string)) {
 	s.onThrottled = fn
+}
+
+// SetDropUnsignedCallback registers a function called when a label is dropped
+// because it lacks a signature and the labeler requires one. The callback
+// receives the labeler DID. Used to increment Prometheus counters without
+// importing metrics from slurper (FCIS).
+func (s *LabelSlurper) SetDropUnsignedCallback(fn func(string)) {
+	s.onDropUnsigned = fn
+}
+
+// SetIngestedCallback registers a function called after each successful
+// PersistIngest. The callback receives the labeler DID and the number of
+// labels ingested. Used to increment Prometheus counters without importing
+// metrics from slurper (FCIS).
+func (s *LabelSlurper) SetIngestedCallback(fn func(string, int)) {
+	s.onIngested = fn
 }
 
 // Run periodically calls Reconcile on a ticker until the context is cancelled.
