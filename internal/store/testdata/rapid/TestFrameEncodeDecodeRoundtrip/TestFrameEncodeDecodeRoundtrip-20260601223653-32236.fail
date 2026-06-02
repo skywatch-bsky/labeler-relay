@@ -1,0 +1,40 @@
+# 2026/06/01 22:36:53.577525 [TestFrameEncodeDecodeRoundtrip] [rapid] draw seq: 1
+# 2026/06/01 22:36:53.577529 [TestFrameEncodeDecodeRoundtrip] [rapid] draw src: "did:plc:0"
+# 2026/06/01 22:36:53.577531 [TestFrameEncodeDecodeRoundtrip] [rapid] draw numLabels: 1
+# 2026/06/01 22:36:53.577533 [TestFrameEncodeDecodeRoundtrip] [rapid] draw sig: []byte{}
+# 2026/06/01 22:36:53.577574 [TestFrameEncodeDecodeRoundtrip] 
+# 	Error Trace:	/Users/scarndp/dev/bluesky/labeler-relay/internal/store/frame_test.go:56
+# 	            				/Users/scarndp/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:458
+# 	            				/Users/scarndp/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:467
+# 	            				/Users/scarndp/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:292
+# 	            				/Users/scarndp/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:207
+# 	            				/Users/scarndp/dev/bluesky/labeler-relay/internal/store/frame_test.go:16
+# 	Error:      	Not equal: 
+# 	            	expected: util.LexBytes{}
+# 	            	actual  : util.LexBytes(nil)
+# 	            	
+# 	            	Diff:
+# 	            	--- Expected
+# 	            	+++ Actual
+# 	            	@@ -1,3 +1,2 @@
+# 	            	-(util.LexBytes) {
+# 	            	-}
+# 	            	+(util.LexBytes) <nil>
+# 	            	 
+# 	Test:       	TestFrameEncodeDecodeRoundtrip
+# 	Messages:   	label 0: Sig bytes must match exactly
+# 
+v0.4.8#16118859704788673080
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
