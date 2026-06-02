@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/scarndp/labeler-relay/internal/metrics"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
@@ -32,7 +31,8 @@ type LabelSlurper struct {
 	sigDefault            bool
 	limits                LimitConfig
 	log                   *slog.Logger
-	onUpstreamsReconciled func(float64) // called after Reconcile with the new upstream count
+	onUpstreamsReconciled func(float64)       // called after Reconcile with the new upstream count
+	onThrottled           func(string)        // called when a labeler is throttled, passed the labeler DID
 
 	mu     sync.Mutex
 	active map[string]*subscriptionContext // keyed by labeler DID
@@ -89,9 +89,11 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 
 			limiter := NewLimiter(s.limits.PerSec, s.limits.PerHour)
 			did := labeler.DID
-			limiter.SetThrottledCallback(func() {
-				metrics.Throttled.WithLabelValues(did).Inc()
-			})
+			if s.onThrottled != nil {
+				limiter.SetThrottledCallback(func() {
+					s.onThrottled(did)
+				})
+			}
 
 			sub := &subscription{
 				labeler:    labeler,
@@ -143,6 +145,13 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 // Prometheus gauges without importing metrics from slurper (FCIS).
 func (s *LabelSlurper) SetUpstreamsCallback(fn func(float64)) {
 	s.onUpstreamsReconciled = fn
+}
+
+// SetThrottledCallback registers a function called when a labeler is throttled
+// by its rate limiter. The callback is passed the labeler DID. Used to increment
+// Prometheus counters without importing metrics from slurper (FCIS).
+func (s *LabelSlurper) SetThrottledCallback(fn func(string)) {
+	s.onThrottled = fn
 }
 
 // Run periodically calls Reconcile on a ticker until the context is cancelled.

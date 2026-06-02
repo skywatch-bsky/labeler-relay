@@ -72,7 +72,7 @@ func run(ctx context.Context) error {
 	hub := server.NewHub()
 	persist.SetBroadcaster(hub.Broadcast)
 
-	// Step 5: Build the slurper and wire upstreams gauge.
+	// Step 5: Build the slurper and wire upstreams gauge and throttled counter.
 	sl := slurper.New(
 		registry,
 		persist,
@@ -85,6 +85,9 @@ func run(ctx context.Context) error {
 	)
 	sl.SetUpstreamsCallback(func(n float64) {
 		metrics.ConnectedUpstreams.Set(n)
+	})
+	sl.SetThrottledCallback(func(did string) {
+		metrics.Throttled.WithLabelValues(did).Inc()
 	})
 
 	// poke triggers an immediate Reconcile on the slurper (used by firehose
@@ -115,9 +118,15 @@ func run(ctx context.Context) error {
 	// Step 7: Build the admin API.
 	adminAPI := admin.NewAPI(registry, resolver, poke, cfg.AdminToken)
 
-	// Step 8: Build the HTTP server.
+	// Step 8: Build the HTTP server and wire consumer count callbacks.
 	retentionSecs := int64(cfg.RetentionWindow / time.Second)
 	srv := server.NewServer(hub, persist, registry, log, retentionSecs)
+	srv.SetConnectCallback(func() {
+		metrics.ConsumerCount.Inc()
+	})
+	srv.SetDisconnectCallback(func() {
+		metrics.ConsumerCount.Dec()
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/xrpc/community.labeler.sync.subscribeLabelers", srv.HandleSubscribeLabelers)

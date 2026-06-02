@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/scarndp/labeler-relay/internal/metrics"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
@@ -47,6 +46,12 @@ type Server struct {
 	subBufSize int
 	// writeTimeout overrides wsWriteTimeout for tests. Zero uses wsWriteTimeout.
 	writeTimeout time.Duration
+	// onConnect is called when a WebSocket connection is established.
+	// Used to increment consumer counters without importing metrics (FCIS).
+	onConnect func()
+	// onDisconnect is called when a WebSocket connection is closed.
+	// Used to decrement consumer counters without importing metrics (FCIS).
+	onDisconnect func()
 }
 
 // NewServer constructs a Server with defaultBufSize for subscribers.
@@ -88,6 +93,20 @@ func (s *Server) effectiveWriteTimeout() time.Duration {
 	return wsWriteTimeout
 }
 
+// SetConnectCallback registers a function called when a WebSocket connection
+// is successfully established. Used to increment consumer counters without
+// importing metrics from server (FCIS).
+func (s *Server) SetConnectCallback(fn func()) {
+	s.onConnect = fn
+}
+
+// SetDisconnectCallback registers a function called when a WebSocket connection
+// is closed. Used to decrement consumer counters without importing metrics
+// from server (FCIS).
+func (s *Server) SetDisconnectCallback(fn func()) {
+	s.onDisconnect = fn
+}
+
 // HandleSubscribeLabelers upgrades the connection to WebSocket and serves the
 // unified community.labeler.sync.subscribeLabelers stream.
 //
@@ -95,15 +114,12 @@ func (s *Server) effectiveWriteTimeout() time.Duration {
 //  1. Parse optional ?cursor= query param.
 //  2. Evaluate cursor state (absent → live from head; present → CursorStatus).
 //  3. Upgrade to WebSocket.
-//  4. StreamFrom the resolved since value.
-//  5. Range over the stream channel writing one frame per event.
-//  6. On channel close (slow-consumer drop), send ConsumerTooSlow and exit.
+//  4. Track the number of active consumers for observability (AC10.3).
+//  5. StreamFrom the resolved since value.
+//  6. Range over the stream channel writing one frame per event.
+//  7. On channel close (slow-consumer drop), send ConsumerTooSlow and exit.
 func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	// Track the number of active consumers for observability (AC10.3).
-	metrics.ConsumerCount.Inc()
-	defer metrics.ConsumerCount.Dec()
 
 	cursorParam := r.URL.Query().Get("cursor")
 
@@ -120,6 +136,17 @@ func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer conn.Close()
+
+	// Track the number of active consumers for observability (AC10.3).
+	// Only increment after successful upgrade.
+	if s.onConnect != nil {
+		s.onConnect()
+	}
+	defer func() {
+		if s.onDisconnect != nil {
+			s.onDisconnect()
+		}
+	}()
 
 	var since int64
 
