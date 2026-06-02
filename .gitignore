@@ -1,0 +1,7 @@
+/labeler-relay
+/*.db
+/*.db-wal
+/*.db-shm
+/.worktrees/
+*.test
+/tmp/
