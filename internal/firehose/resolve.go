@@ -5,6 +5,7 @@ package firehose
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
@@ -38,8 +39,14 @@ func (r *indigoResolver) LabelerEndpoint(ctx context.Context, did string) (strin
 	}
 
 	// Find the atproto_labeler service.
+	// Match on Type="atproto_labeler" as primary, or ID containing "#atproto_labeler" as fallback.
 	for _, svc := range didDoc.Service {
 		if svc.Type == "atproto_labeler" {
+			return svc.ServiceEndpoint, nil
+		}
+	}
+	for _, svc := range didDoc.Service {
+		if strings.Contains(svc.ID, "#atproto_labeler") {
 			return svc.ServiceEndpoint, nil
 		}
 	}
