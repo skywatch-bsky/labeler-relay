@@ -3,6 +3,7 @@ package slurper
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -465,6 +466,355 @@ func TestSubscriptionRedialOnServerRestart(t *testing.T) {
 	fakeServer1.Close()
 }
 
+// TestSubscriptionDropsUnsignedLabelsWhenRequireSigTrue verifies AC4.2:
+// with require_sig=true, an unsigned label is DROPPED and the
+// labeler_relay_dropped_unsigned_total counter increments.
+func TestSubscriptionDropsUnsignedLabelsWhenRequireSigTrue(t *testing.T) {
+	t.Parallel()
+
+	fakeServer := newFakeLabelerServer(t)
+	defer fakeServer.Close()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	// Use a fresh registry to isolate metrics by labeler DID.
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	// Labeler with require_sig=nil, global default=true => sig required.
+	labeler := store.Labeler{
+		DID:      "did:plc:unsigned-drop-test",
+		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "test",
+		Enabled:  true,
+		RequireSig: nil,
+	}
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to insert labeler: %v", err)
+	}
+
+	sub := &subscription{
+		labeler:    labeler,
+		persist:    persist,
+		registry:   registry,
+		limiter:    NewLimiter(1000, 100000),
+		sigDefault: true,
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = sub.run(ctx)
+	}()
+
+	select {
+	case <-fakeServer.wsReady:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for websocket ready")
+	}
+
+	// Read baseline dropped counter.
+	baselineDropped, err := getMetricValue(reg, "labeler_relay_dropped_unsigned_total", labeler.DID)
+	if err != nil {
+		t.Logf("baseline dropped not found (expected): %v", err)
+		baselineDropped = 0
+	}
+
+	// Send an UNSIGNED label (Sig is nil).
+	frame := &atproto.LabelSubscribeLabels_Labels{
+		Labels: []*atproto.LabelDefs_Label{
+			{
+				Src: labeler.DID,
+				Uri: "at://did:plc:user/app.bsky.feed.post/abc",
+				Val: "test",
+				Cts: time.Now().UTC().Format(time.RFC3339),
+				Sig: nil,
+			},
+		},
+		Seq: 100,
+	}
+
+	if err := fakeServer.sendFrame(frame); err != nil {
+		t.Fatalf("failed to send frame: %v", err)
+	}
+
+	// Wait for the metric to reflect the drop (condition-based, no fixed sleep).
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	var finalDropped float64
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for dropped counter to increment")
+		case <-ticker.C:
+			finalDropped, err = getMetricValue(reg, "labeler_relay_dropped_unsigned_total", labeler.DID)
+			if err == nil && finalDropped > baselineDropped {
+				// Counter incremented.
+				goto verified
+			}
+		}
+	}
+
+verified:
+	// Assert the head did NOT advance (label was not persisted).
+	head, err := persist.Head(context.Background())
+	if err != nil {
+		t.Fatalf("failed to read head: %v", err)
+	}
+	if head != 0 {
+		t.Errorf("expected head=0 (unsigned label dropped), got %d", head)
+	}
+
+	// Assert the counter incremented by 1.
+	if finalDropped != baselineDropped+1 {
+		t.Errorf("expected dropped counter to increment by 1 (from %v to %v), got delta %v",
+			baselineDropped, finalDropped, finalDropped-baselineDropped)
+	}
+}
+
+// TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride verifies AC4.3:
+// with per-labeler require_sig=false override, an unsigned label IS persisted.
+func TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride(t *testing.T) {
+	t.Parallel()
+
+	fakeServer := newFakeLabelerServer(t)
+	defer fakeServer.Close()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	// Labeler with require_sig=false override, global default=true => sig NOT required for this labeler.
+	labeler := store.Labeler{
+		DID:      "did:plc:unsigned-relay-test",
+		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "test",
+		Enabled:  true,
+		RequireSig: boolPtr(false),
+	}
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to insert labeler: %v", err)
+	}
+
+	sub := &subscription{
+		labeler:    labeler,
+		persist:    persist,
+		registry:   registry,
+		limiter:    NewLimiter(1000, 100000),
+		sigDefault: true,
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = sub.run(ctx)
+	}()
+
+	select {
+	case <-fakeServer.wsReady:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for websocket ready")
+	}
+
+	// Send an UNSIGNED label.
+	frame := &atproto.LabelSubscribeLabels_Labels{
+		Labels: []*atproto.LabelDefs_Label{
+			{
+				Src: labeler.DID,
+				Uri: "at://did:plc:user/app.bsky.feed.post/def",
+				Val: "unsigned-allowed",
+				Cts: time.Now().UTC().Format(time.RFC3339),
+				Sig: nil,
+			},
+		},
+		Seq: 101,
+	}
+
+	if err := fakeServer.sendFrame(frame); err != nil {
+		t.Fatalf("failed to send frame: %v", err)
+	}
+
+	// Wait for the label to be persisted.
+	head, err := waitForCondition(ctx, func() (int64, error) {
+		return persist.Head(context.Background())
+	}, 1)
+	if err != nil {
+		t.Fatalf("timeout waiting for label to be persisted: %v", err)
+	}
+
+	if head < 1 {
+		t.Errorf("expected head >= 1 (unsigned label persisted), got %d", head)
+	}
+
+	// Verify the decoded label has an empty Sig.
+	var storedFrameBytes []byte
+	row := testStore.DB().QueryRowContext(context.Background(),
+		`SELECT frame_cbor FROM events WHERE relay_seq = ?`, head)
+	if err := row.Scan(&storedFrameBytes); err != nil {
+		t.Fatalf("failed to read stored frame: %v", err)
+	}
+
+	r := bytes.NewReader(storedFrameBytes)
+	var decodedFrame atproto.LabelSubscribeLabels_Labels
+	if err := decodedFrame.UnmarshalCBOR(r); err != nil {
+		t.Fatalf("failed to unmarshal stored frame: %v", err)
+	}
+
+	if len(decodedFrame.Labels) != 1 {
+		t.Fatalf("expected 1 label, got %d", len(decodedFrame.Labels))
+	}
+
+	// Unsigned label should have been persisted with empty Sig.
+	storedSig := decodedFrame.Labels[0].Sig
+	if len(storedSig) != 0 {
+		t.Errorf("expected empty Sig for unsigned label, got %v", storedSig)
+	}
+}
+
+// TestSubscriptionIncrementsIngestedTotalMetric verifies that IngestedTotal
+// is incremented by len(kept) after a successful PersistIngest.
+func TestSubscriptionIncrementsIngestedTotalMetric(t *testing.T) {
+	t.Parallel()
+
+	fakeServer := newFakeLabelerServer(t)
+	defer fakeServer.Close()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	labeler := store.Labeler{
+		DID:      "did:plc:ingested-metric-test",
+		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "test",
+		Enabled:  true,
+		RequireSig: boolPtr(true),
+	}
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to insert labeler: %v", err)
+	}
+
+	sub := &subscription{
+		labeler:    labeler,
+		persist:    persist,
+		registry:   registry,
+		limiter:    NewLimiter(1000, 100000),
+		sigDefault: true,
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = sub.run(ctx)
+	}()
+
+	select {
+	case <-fakeServer.wsReady:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for websocket ready")
+	}
+
+	// Read baseline ingested metric.
+	baselineIngested, err := getMetricValue(reg, "labeler_relay_ingested_total", labeler.DID)
+	if err != nil {
+		t.Logf("baseline ingested not found (expected): %v", err)
+		baselineIngested = 0
+	}
+
+	// Send a signed label frame with 2 labels.
+	frame := &atproto.LabelSubscribeLabels_Labels{
+		Labels: []*atproto.LabelDefs_Label{
+			{
+				Src: labeler.DID,
+				Uri: "at://did:plc:user1/app.bsky.feed.post/1",
+				Val: "label1",
+				Cts: time.Now().UTC().Format(time.RFC3339),
+				Sig: []byte{0x01, 0x02},
+			},
+			{
+				Src: labeler.DID,
+				Uri: "at://did:plc:user2/app.bsky.feed.post/2",
+				Val: "label2",
+				Cts: time.Now().UTC().Format(time.RFC3339),
+				Sig: []byte{0x03, 0x04},
+			},
+		},
+		Seq: 200,
+	}
+
+	if err := fakeServer.sendFrame(frame); err != nil {
+		t.Fatalf("failed to send frame: %v", err)
+	}
+
+	// Wait for the labels to be persisted.
+	_, err = waitForCondition(ctx, func() (int64, error) {
+		return persist.Head(context.Background())
+	}, 1)
+	if err != nil {
+		t.Fatalf("timeout waiting for labels to be persisted: %v", err)
+	}
+
+	// Wait for the metric to reflect the ingest (condition-based, no fixed sleep).
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	var finalIngested float64
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for ingested metric to increment")
+		case <-ticker.C:
+			finalIngested, err = getMetricValue(reg, "labeler_relay_ingested_total", labeler.DID)
+			if err == nil && finalIngested >= baselineIngested+2 {
+				goto verified
+			}
+		}
+	}
+
+verified:
+	// Assert the counter advanced by 2 (one for each label).
+	if finalIngested != baselineIngested+2 {
+		t.Errorf("expected ingested counter to advance by 2 (from %v to %v), got final %v",
+			baselineIngested, baselineIngested+2, finalIngested)
+	}
+}
+
 // waitForCondition polls a condition function until it returns >= minValue,
 // or times out.
 func waitForCondition(ctx context.Context, fn func() (int64, error), minValue int64) (int64, error) {
@@ -485,5 +835,26 @@ func waitForCondition(ctx context.Context, fn func() (int64, error), minValue in
 			}
 		}
 	}
+}
+
+// getMetricValue retrieves a Prometheus counter metric value for a given label value.
+func getMetricValue(reg *prometheus.Registry, metricName, labelValue string) (float64, error) {
+	metrics, err := reg.Gather()
+	if err != nil {
+		return 0, err
+	}
+
+	for _, mf := range metrics {
+		if mf.GetName() == metricName {
+			for _, m := range mf.GetMetric() {
+				for _, lp := range m.GetLabel() {
+					if lp.GetName() == "labeler_did" && lp.GetValue() == labelValue {
+						return m.GetCounter().GetValue(), nil
+					}
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("metric %s with label %s not found", metricName, labelValue)
 }
 

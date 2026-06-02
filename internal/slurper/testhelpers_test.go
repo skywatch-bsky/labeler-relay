@@ -17,7 +17,6 @@ import (
 // fakeLabelerServer is a test fixture that emits subscribeLabels frames via WebSocket.
 type fakeLabelerServer struct {
 	server    *httptest.Server
-	ws        *websocket.Conn
 	mu        sync.Mutex
 	wsReady   chan struct{}
 	wsConn    *websocket.Conn

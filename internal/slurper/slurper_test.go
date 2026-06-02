@@ -519,3 +519,143 @@ func TestSlurperReconcileIsIdempotent(t *testing.T) {
 		t.Errorf("subscription was replaced on second Reconcile; should be idempotent")
 	}
 }
+
+// TestSlurperReconcileIsolatesRateLimitingPerLabeler verifies AC7.2 through
+// the real Reconcile wiring: flooding one labeler does not starve another.
+// Unlike TestSlurperIsolatesRateLimitingPerLabeler (which builds subscriptions
+// directly), this test goes through New(...) and Reconcile, proving that each
+// subscription gets its own Limiter at slurper.go:92.
+func TestSlurperReconcileIsolatesRateLimitingPerLabeler(t *testing.T) {
+	t.Parallel()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	fakeServerA := newFakeLabelerServer(t)
+	fakeServerB := newFakeLabelerServer(t)
+	defer fakeServerA.Close()
+	defer fakeServerB.Close()
+
+	labelerA := store.Labeler{
+		DID:      "did:plc:reconcile-saturated",
+		Endpoint: fakeServerA.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "test",
+		Enabled:  true,
+	}
+	labelerB := store.Labeler{
+		DID:      "did:plc:reconcile-free",
+		Endpoint: fakeServerB.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "test",
+		Enabled:  true,
+	}
+
+	if err := registry.Upsert(context.Background(), labelerA); err != nil {
+		t.Fatalf("failed to insert labelerA: %v", err)
+	}
+	if err := registry.Upsert(context.Background(), labelerB); err != nil {
+		t.Fatalf("failed to insert labelerB: %v", err)
+	}
+
+	// Create slurper with a tiny PerSec for labelerA to throttle it;
+	// labelerB will be independent because each subscription gets its own Limiter.
+	slurper := New(
+		registry,
+		persist,
+		false,
+		LimitConfig{PerSec: 2, PerHour: 100000},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	defer slurper.Shutdown()
+
+	// Reconcile to start both subscriptions.
+	if err := slurper.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Wait for both upstream connections.
+	select {
+	case <-fakeServerA.wsReady:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for labelerA")
+	}
+	select {
+	case <-fakeServerB.wsReady:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for labelerB")
+	}
+
+	// Send 10 frames from A (saturating at 2/sec).
+	for i := 1; i <= 10; i++ {
+		frame := &atproto.LabelSubscribeLabels_Labels{
+			Labels: []*atproto.LabelDefs_Label{
+				{
+					Src: labelerA.DID,
+					Uri: fmt.Sprintf("at://did:plc:user/app.bsky.feed.post/a%d", i),
+					Val: "labelA",
+					Cts: time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+			Seq: int64(i),
+		}
+		if err := fakeServerA.sendFrame(frame); err != nil {
+			t.Fatalf("failed to send frameA %d: %v", i, err)
+		}
+	}
+
+	// Send 3 frames from B (unthrottled at 2/sec with high limit).
+	for i := 1; i <= 3; i++ {
+		frame := &atproto.LabelSubscribeLabels_Labels{
+			Labels: []*atproto.LabelDefs_Label{
+				{
+					Src: labelerB.DID,
+					Uri: fmt.Sprintf("at://did:plc:user/app.bsky.feed.post/b%d", i),
+					Val: "labelB",
+					Cts: time.Now().UTC().Format(time.RFC3339),
+				},
+			},
+			Seq: int64(i),
+		}
+		if err := fakeServerB.sendFrame(frame); err != nil {
+			t.Fatalf("failed to send frameB %d: %v", i, err)
+		}
+	}
+
+	// Wait for B to finish all 3 frames while A is throttled.
+	// Use condition-based polling (no fixed sleep) to detect when B reaches 3.
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		countB := countEvents(t, testStore, labelerB.DID)
+		if countB >= 3 {
+			// B finished; now verify A is still behind (isolation proof).
+			countA := countEvents(t, testStore, labelerA.DID)
+			if countA >= 10 {
+				t.Errorf("isolation broken: A should be throttled (<10) when B finishes, but A=%d", countA)
+			}
+			t.Logf("isolation confirmed through Reconcile: B ingested 3 while A was at %d", countA)
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout: B did not ingest 3 frames (got %d); isolation broken",
+				countEvents(t, testStore, labelerB.DID))
+		case <-ticker.C:
+		}
+	}
+}

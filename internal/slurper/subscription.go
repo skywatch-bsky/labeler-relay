@@ -27,9 +27,6 @@ type subscription struct {
 	limiter    *Limiter
 	sigDefault bool
 	log        *slog.Logger
-
-	// Tracking state for batched cursor flush
-	pendingSeq *int64
 }
 
 // run starts the subscription loop with redial + backoff. It blocks until ctx is cancelled.
@@ -54,7 +51,11 @@ func (s *subscription) run(ctx context.Context) error {
 		}
 
 		// Compute next backoff with jitter.
-		jitter := rand.Intn(int(float64(backoffMs) * 0.1))
+		maxJitter := int(float64(backoffMs) * 0.1)
+		if maxJitter < 1 {
+			maxJitter = 1
+		}
+		jitter := rand.Intn(maxJitter)
 		sleepMs := backoffMs + jitter
 		if sleepMs > maxBackoffMs {
 			sleepMs = maxBackoffMs
@@ -125,7 +126,7 @@ func (s *subscription) dial(ctx context.Context) error {
 // handleEvent is called by the sequential scheduler for each frame event.
 func (s *subscription) handleEvent(ctx context.Context, evt *stream.XRPCStreamEvent) error {
 	cb := &stream.RepoStreamCallbacks{
-		LabelLabels: s.handleLabelLabels,
+		LabelLabels: func(evt *atproto.LabelSubscribeLabels_Labels) error { return s.handleLabelLabels(ctx, evt) },
 		LabelInfo:   s.handleLabelInfo,
 		Error:       s.handleError,
 	}
@@ -133,17 +134,14 @@ func (s *subscription) handleEvent(ctx context.Context, evt *stream.XRPCStreamEv
 }
 
 // handleLabelLabels processes a #labels frame.
-// Note: ctx parameter is not available here as we're in a callback.
-// We use a background context, which will be cancelled through HandleRepoStream's context.
-func (s *subscription) handleLabelLabels(evt *atproto.LabelSubscribeLabels_Labels) error {
+func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.LabelSubscribeLabels_Labels) error {
 	// Process each label in the frame.
 	var kept []*atproto.LabelDefs_Label
 
 	sigRequired := SigRequired(s.labeler.RequireSig, s.sigDefault)
 
 	for _, label := range evt.Labels {
-		// Rate limit. Use background context since we're in a callback and can't pass the outer context.
-		if err := s.limiter.Wait(context.Background()); err != nil {
+		if err := s.limiter.Wait(ctx); err != nil {
 			return fmt.Errorf("rate limiter failed: %w", err)
 		}
 
@@ -158,13 +156,11 @@ func (s *subscription) handleLabelLabels(evt *atproto.LabelSubscribeLabels_Label
 	}
 
 	if len(kept) == 0 {
-		// No labels to persist, but we may still want to update the cursor.
-		// For now, just return without persisting.
 		return nil
 	}
 
 	// Persist the kept labels.
-	relaySeq, err := s.persist.PersistIngest(context.Background(), store.IngestEvent{
+	_, err := s.persist.PersistIngest(ctx, store.IngestEvent{
 		Kind:        "labels",
 		LabelerDID:  s.labeler.DID,
 		UpstreamSeq: &evt.Seq,
@@ -174,18 +170,12 @@ func (s *subscription) handleLabelLabels(evt *atproto.LabelSubscribeLabels_Label
 		return fmt.Errorf("failed to persist labels: %w", err)
 	}
 
-	_ = relaySeq // Silence unused variable; relaySeq is consumed by the broadcast.
+	// Increment ingested metric.
+	metrics.IngestedTotal.WithLabelValues(s.labeler.DID).Add(float64(len(kept)))
 
-	// After successful persist, record the seq for batched flush.
-	s.pendingSeq = &evt.Seq
-
-	// Flush batched cursor if we have collected a batch.
-	// For simplicity, flush after each frame. A production system might batch more aggressively.
-	if s.pendingSeq != nil {
-		if err := s.registry.WriteCursor(context.Background(), s.labeler.DID, *s.pendingSeq); err != nil {
-			return fmt.Errorf("failed to flush cursor: %w", err)
-		}
-		s.pendingSeq = nil
+	// Write cursor after successful persist (crash-safe ordering).
+	if err := s.registry.WriteCursor(ctx, s.labeler.DID, evt.Seq); err != nil {
+		return fmt.Errorf("failed to flush cursor: %w", err)
 	}
 
 	return nil
