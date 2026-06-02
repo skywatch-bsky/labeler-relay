@@ -47,9 +47,10 @@ type LiveEvent struct {
 // PersistIngest, which mints the relay seq, stores the relay-seq'd frame,
 // and broadcasts to live subscribers.
 type LabelPersist struct {
-	store       *Store
-	mu          sync.Mutex             // serializes seq minting; single-writer
-	broadcaster func(LiveEvent)
+	store          *Store
+	mu             sync.Mutex     // serializes seq minting; single-writer
+	broadcaster    func(LiveEvent)
+	onHeadAdvanced func(float64)  // called after each successful persist with the new seq
 }
 
 // NewLabelPersist creates a new LabelPersist backed by the given store.
@@ -67,6 +68,16 @@ func (p *LabelPersist) SetBroadcaster(fn func(LiveEvent)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.broadcaster = fn
+}
+
+// SetHeadSeqCallback registers a function called after each successful
+// PersistIngest with the new relay_seq as a float64. Used to update
+// Prometheus gauges without importing the metrics package from store
+// (FCIS: callback injection keeps store decoupled from metrics).
+func (p *LabelPersist) SetHeadSeqCallback(fn func(float64)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onHeadAdvanced = fn
 }
 
 // PersistIngest mints the relay seq, stores the relay-seq'd frame body,
@@ -143,6 +154,12 @@ func (p *LabelPersist) PersistIngest(ctx context.Context, e IngestEvent) (relayS
 			LabelerDID: e.LabelerDID,
 			FrameCBOR:  frameBytes,
 		})
+	}
+
+	// Step 6: Notify head-seq observer (e.g. Prometheus gauge) without holding
+	// a reference to the metrics package from store (FCIS callback injection).
+	if p.onHeadAdvanced != nil {
+		p.onHeadAdvanced(float64(relaySeq))
 	}
 
 	return relaySeq, nil

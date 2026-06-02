@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/scarndp/labeler-relay/internal/metrics"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
@@ -99,6 +100,10 @@ func (s *Server) effectiveWriteTimeout() time.Duration {
 //  6. On channel close (slow-consumer drop), send ConsumerTooSlow and exit.
 func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Track the number of active consumers for observability (AC10.3).
+	metrics.ConsumerCount.Inc()
+	defer metrics.ConsumerCount.Dec()
 
 	cursorParam := r.URL.Query().Get("cursor")
 

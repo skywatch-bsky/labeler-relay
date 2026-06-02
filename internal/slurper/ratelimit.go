@@ -13,10 +13,11 @@ import (
 // rate limiting. Each labeler owns its own Limiter instance, so throttling
 // is isolated per goroutine (AC7.2).
 type Limiter struct {
-	perSecond  *slidingwindow.Limiter
-	perSecStop slidingwindow.StopFunc
-	perHour    *slidingwindow.Limiter
+	perSecond   *slidingwindow.Limiter
+	perSecStop  slidingwindow.StopFunc
+	perHour     *slidingwindow.Limiter
 	perHourStop slidingwindow.StopFunc
+	onThrottled func() // called when Wait has to block; may be nil
 }
 
 // NewLimiter creates a new rate limiter with the given per-second and per-hour
@@ -46,6 +47,13 @@ func NewLimiter(perSec, perHour int) *Limiter {
 	}
 }
 
+// SetThrottledCallback registers a function called whenever Wait has to block
+// due to rate limiting. Used to increment Prometheus counters without importing
+// the metrics package from slurper (FCIS: callback injection).
+func (l *Limiter) SetThrottledCallback(fn func()) {
+	l.onThrottled = fn
+}
+
 // Wait blocks until a token is available across both windows or ctx is done.
 // It polls the limiters with a short backoff until both Allow() return true
 // or the context is cancelled. This blocks only the calling goroutine,
@@ -62,6 +70,11 @@ func (l *Limiter) Wait(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Notify observer that throttling occurred (AC7.1 observability).
+		if l.onThrottled != nil {
+			l.onThrottled()
 		}
 
 		// Short backoff before retry

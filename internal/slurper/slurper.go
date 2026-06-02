@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scarndp/labeler-relay/internal/metrics"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
@@ -26,11 +27,12 @@ type subscriptionContext struct {
 
 // LabelSlurper manages the set of subscription goroutines, one per enabled labeler.
 type LabelSlurper struct {
-	registry   *store.LabelerRegistry
-	persist    *store.LabelPersist
-	sigDefault bool
-	limits     LimitConfig
-	log        *slog.Logger
+	registry              *store.LabelerRegistry
+	persist               *store.LabelPersist
+	sigDefault            bool
+	limits                LimitConfig
+	log                   *slog.Logger
+	onUpstreamsReconciled func(float64) // called after Reconcile with the new upstream count
 
 	mu     sync.Mutex
 	active map[string]*subscriptionContext // keyed by labeler DID
@@ -85,11 +87,17 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 			// New labeler: start a subscription.
 			subCtx, subCancel := context.WithCancel(s.ctx)
 
+			limiter := NewLimiter(s.limits.PerSec, s.limits.PerHour)
+			did := labeler.DID
+			limiter.SetThrottledCallback(func() {
+				metrics.Throttled.WithLabelValues(did).Inc()
+			})
+
 			sub := &subscription{
 				labeler:    labeler,
 				persist:    s.persist,
 				registry:   s.registry,
-				limiter:    NewLimiter(s.limits.PerSec, s.limits.PerHour),
+				limiter:    limiter,
 				sigDefault: s.sigDefault,
 				log:        s.log,
 			}
@@ -122,7 +130,19 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 		}
 	}
 
+	// Notify observer of updated upstream count (e.g. Prometheus gauge).
+	if s.onUpstreamsReconciled != nil {
+		s.onUpstreamsReconciled(float64(len(s.active)))
+	}
+
 	return nil
+}
+
+// SetUpstreamsCallback registers a function called after each Reconcile with
+// the current number of active upstream subscriptions. Used to update
+// Prometheus gauges without importing metrics from slurper (FCIS).
+func (s *LabelSlurper) SetUpstreamsCallback(fn func(float64)) {
+	s.onUpstreamsReconciled = fn
 }
 
 // Run periodically calls Reconcile on a ticker until the context is cancelled.
