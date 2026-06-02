@@ -8,3 +8,6 @@
 **/testdata/rapid/
 utils/node_modules/
 *.csv
+labeler-relay-linux-amd64
+labeler-relay-linux-arm64
+Dockerfile.k3s
