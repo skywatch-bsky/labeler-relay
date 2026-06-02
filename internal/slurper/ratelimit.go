@@ -54,13 +54,24 @@ func (l *Limiter) SetThrottledCallback(fn func()) {
 	l.onThrottled = fn
 }
 
+// Close stops the background goroutines that the sliding-window limiters
+// created via their StopFunc. Must be called when the Limiter is no longer
+// needed to prevent a goroutine leak.
+func (l *Limiter) Close() {
+	l.perSecStop()
+	l.perHourStop()
+}
+
 // Wait blocks until a token is available across both windows or ctx is done.
 // It polls the limiters with a short backoff until both Allow() return true
 // or the context is cancelled. This blocks only the calling goroutine,
 // never a shared resource.
 func (l *Limiter) Wait(ctx context.Context) error {
 	for {
-		// Check if both windows allow a token
+		// Allow() is destructive: it consumes a token from the window even if the
+		// other window later rejects. When perSecond allows but perHour rejects, the
+		// per-second token is silently wasted. This is accepted imprecision — label
+		// throughput is low enough that the loss is negligible.
 		if l.perSecond.Allow() && l.perHour.Allow() {
 			return nil
 		}
