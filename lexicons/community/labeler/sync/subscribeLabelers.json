@@ -1,0 +1,92 @@
+{
+  "lexicon": 1,
+  "id": "community.labeler.sync.subscribeLabelers",
+  "defs": {
+    "main": {
+      "type": "subscription",
+      "description": "Subscribe to an aggregated, re-sequenced stream of labels and labeler service records from multiple upstream labelers. Each message carries a single monotonic relay-assigned seq.",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "description": "The last known relay seq. Backfill resumes from seq > cursor."
+          }
+        }
+      },
+      "message": {
+        "schema": {
+          "type": "union",
+          "refs": [
+            "#labels",
+            "#service",
+            "#info"
+          ]
+        }
+      },
+      "errors": [
+        {
+          "name": "FutureCursor",
+          "description": "The provided cursor is greater than the current head seq."
+        }
+      ]
+    },
+    "labels": {
+      "type": "object",
+      "description": "A batch of labels relayed from an upstream labeler, carrying the relay-minted seq. Label bytes (including sig) are byte-faithful to the upstream frame.",
+      "required": ["seq", "src", "labels"],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "description": "Relay-minted global sequence number."
+        },
+        "src": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the origin labeler these labels came from."
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "com.atproto.label.defs#label"
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "description": "A labeler service record (full app.bsky.labeler.service) observed via discovery, carrying the relay-minted seq.",
+      "required": ["seq", "src", "record"],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "description": "Relay-minted global sequence number."
+        },
+        "src": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the labeler whose service record this is."
+        },
+        "record": {
+          "type": "ref",
+          "ref": "app.bsky.labeler.service"
+        }
+      }
+    },
+    "info": {
+      "type": "object",
+      "description": "An informational frame, e.g. OutdatedCursor when a cursor falls below the retention floor.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "knownValues": ["OutdatedCursor"]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
