@@ -97,6 +97,25 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 	return fls
 }
 
+func (fls *fakeLabelerServer) dropConn() {
+	fls.mu.Lock()
+	defer fls.mu.Unlock()
+	if fls.wsConn != nil {
+		fls.wsConn.Close()
+	}
+	fls.wsConn = nil
+	// Reset wsReady for the reconnect.
+	select {
+	case <-fls.wsReady:
+		// Already closed, create a new one.
+		fls.wsReady = make(chan struct{})
+	default:
+		// Not closed yet, just close it.
+		close(fls.wsReady)
+		fls.wsReady = make(chan struct{})
+	}
+}
+
 func (fls *fakeLabelerServer) Close() {
 	fls.mu.Lock()
 	if fls.wsConn != nil {

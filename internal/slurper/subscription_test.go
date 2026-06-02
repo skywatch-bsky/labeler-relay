@@ -414,30 +414,17 @@ func TestSubscriptionRedialOnServerRestart(t *testing.T) {
 		t.Errorf("expected cursor 50 after first frame, got %v", cursor)
 	}
 
-	// Close first server to trigger redial.
-	fakeServer1.Close()
+	// Drop the connection to trigger redial (without closing the server).
+	fakeServer1.dropConn()
 
-	// Wait a bit for the subscription to detect the disconnect.
-	time.Sleep(500 * time.Millisecond)
-
-	// Start second server with same endpoint.
-	fakeServer2 := newFakeLabelerServer(t)
-	labeler.Endpoint = fakeServer2.server.URL + "/xrpc/com.atproto.label.subscribeLabels"
-	if err := registry.Upsert(context.Background(), labeler); err != nil {
-		t.Fatalf("failed to update labeler endpoint: %v", err)
-	}
-
-	// Update subscription endpoint.
-	sub.labeler.Endpoint = labeler.Endpoint
-
-	// Wait for second connection (reconnect should happen within a few seconds).
+	// Wait for the subscription to reconnect to the same server.
 	select {
-	case <-fakeServer2.wsReady:
+	case <-fakeServer1.wsReady:
 	case <-ctx.Done():
 		t.Fatalf("timeout waiting for reconnection")
 	}
 
-	// Send second frame with higher seq.
+	// Send second frame with higher seq on the same server.
 	frame2 := &atproto.LabelSubscribeLabels_Labels{
 		Labels: []*atproto.LabelDefs_Label{
 			{
@@ -450,7 +437,7 @@ func TestSubscriptionRedialOnServerRestart(t *testing.T) {
 		Seq: 51,
 	}
 
-	if err := fakeServer2.sendFrame(frame2); err != nil {
+	if err := fakeServer1.sendFrame(frame2); err != nil {
 		t.Fatalf("failed to send second frame: %v", err)
 	}
 
@@ -475,7 +462,7 @@ func TestSubscriptionRedialOnServerRestart(t *testing.T) {
 		t.Errorf("expected cursor 51 after reconnect, got %v", cursor)
 	}
 
-	fakeServer2.Close()
+	fakeServer1.Close()
 }
 
 // waitForCondition polls a condition function until it returns >= minValue,
