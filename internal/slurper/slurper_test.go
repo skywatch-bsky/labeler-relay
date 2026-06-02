@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -451,6 +452,135 @@ func TestSlurperIsolatesRateLimitingPerLabeler(t *testing.T) {
 	}
 
 	t.Logf("isolation confirmed: free labeler ingested 5 while saturated was at %d", satCount)
+}
+
+// TestSlurperPokeCoalescesMultipleSignals verifies that rapid Poke() calls
+// collapse into fewer Reconcile invocations. The channel has capacity 1, so
+// N pokes fired before the Run loop drains it produce at most 1 reconcile.
+func TestSlurperPokeCoalescesMultipleSignals(t *testing.T) {
+	t.Parallel()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	sl := New(
+		registry,
+		persist,
+		false,
+		LimitConfig{PerSec: 1000, PerHour: 100000},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	defer sl.Shutdown()
+
+	var reconcileCount int32
+
+	// Track reconciles via the upstreams callback (called once per Reconcile).
+	sl.SetUpstreamsCallback(func(_ float64) {
+		atomic.AddInt32(&reconcileCount, 1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start the Run loop.
+	go func() { _ = sl.Run(ctx) }()
+
+	// Fire 20 pokes rapidly. The channel has capacity 1, so at most 1 is
+	// buffered at any time — the Run loop will drain it and reconcile once,
+	// and subsequent pokes that arrive while the channel is full are dropped.
+	for i := 0; i < 20; i++ {
+		sl.Poke()
+	}
+
+	// Give the Run loop time to process the coalesced poke(s).
+	time.Sleep(200 * time.Millisecond)
+
+	count := atomic.LoadInt32(&reconcileCount)
+
+	// With 20 rapid pokes and a capacity-1 channel, we expect far fewer than
+	// 20 reconciles. In practice it's 1-3 depending on goroutine scheduling.
+	if count >= 20 {
+		t.Errorf("expected coalescing to reduce reconcile count below 20, got %d", count)
+	}
+
+	// At least 1 reconcile must have fired from the poke.
+	if count < 1 {
+		t.Errorf("expected at least 1 reconcile from poke, got %d", count)
+	}
+
+	t.Logf("20 rapid pokes produced %d reconcile(s)", count)
+}
+
+// TestSlurperPokeTriggersReconcile verifies that a single Poke() triggers
+// a Reconcile that picks up a newly enabled labeler without waiting for
+// the 10-second ticker.
+func TestSlurperPokeTriggersReconcile(t *testing.T) {
+	t.Parallel()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	fakeServer := newFakeLabelerServer(t)
+	defer fakeServer.Close()
+
+	sl := New(
+		registry,
+		persist,
+		false,
+		LimitConfig{PerSec: 1000, PerHour: 100000},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	defer sl.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Start the Run loop.
+	go func() { _ = sl.Run(ctx) }()
+
+	// Register a labeler after Run has started.
+	labeler := store.Labeler{
+		DID:      "did:plc:poke-test",
+		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "test",
+		Enabled:  true,
+	}
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to insert labeler: %v", err)
+	}
+
+	// Poke to trigger immediate reconcile (don't wait for 10s ticker).
+	sl.Poke()
+
+	// The subscription should connect within a fraction of a second.
+	select {
+	case <-fakeServer.wsReady:
+		t.Log("poke triggered reconcile and subscription connected")
+	case <-ctx.Done():
+		t.Fatal("timeout: poke did not trigger a reconcile that started the subscription")
+	}
 }
 
 // TestSlurperReconcileIsIdempotent verifies that calling Reconcile twice

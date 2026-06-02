@@ -36,6 +36,7 @@ type LabelSlurper struct {
 	onDropUnsigned        func(string)         // called when a label is dropped for missing signature, passed the labeler DID
 	onIngested            func(string, int)    // called after a successful PersistIngest with labeler DID and count
 
+	pokeCh chan struct{} // capacity-1 signal; multiple Poke() calls collapse into one Reconcile
 	mu     sync.Mutex
 	active map[string]*subscriptionContext // keyed by labeler DID
 	ctx    context.Context
@@ -57,6 +58,7 @@ func New(
 		sigDefault: sigDefault,
 		limits:     limits,
 		log:        log,
+		pokeCh:     make(chan struct{}, 1),
 		active:     make(map[string]*subscriptionContext),
 		ctx:        ctx,
 		cancel:     cancel,
@@ -176,8 +178,18 @@ func (s *LabelSlurper) SetIngestedCallback(fn func(string, int)) {
 	s.onIngested = fn
 }
 
+// Poke requests an immediate Reconcile on the next Run loop iteration.
+// Non-blocking: if a poke is already pending it is collapsed into one reconcile.
+func (s *LabelSlurper) Poke() {
+	select {
+	case s.pokeCh <- struct{}{}:
+	default:
+	}
+}
+
 // Run periodically calls Reconcile on a ticker until the context is cancelled.
-// It allows the caller to reconcile on demand via channels in future phases.
+// It also selects on pokeCh so that callers (firehose watcher, admin API) can
+// trigger an immediate reconcile without spawning unbounded goroutines.
 func (s *LabelSlurper) Run(ctx context.Context) error {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -189,6 +201,10 @@ func (s *LabelSlurper) Run(ctx context.Context) error {
 		case <-ticker.C:
 			if err := s.Reconcile(ctx); err != nil {
 				s.log.Error("reconcile failed", "err", err)
+			}
+		case <-s.pokeCh:
+			if err := s.Reconcile(ctx); err != nil {
+				s.log.Error("poke reconcile failed", "err", err)
 			}
 		}
 	}

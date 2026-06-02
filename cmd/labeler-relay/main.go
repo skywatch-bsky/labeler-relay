@@ -96,17 +96,6 @@ func run(ctx context.Context) error {
 		metrics.IngestedTotal.WithLabelValues(did).Add(float64(n))
 	})
 
-	// poke triggers an immediate Reconcile on the slurper (used by firehose
-	// watcher and admin API to react to registry changes without waiting for
-	// the next ticker interval).
-	poke := func() {
-		go func() {
-			if err := sl.Reconcile(ctx); err != nil && err != context.Canceled {
-				log.Error("poke reconcile failed", "err", err)
-			}
-		}()
-	}
-
 	// Step 6: Build the firehose watcher. identity.BaseDirectory{} is the zero
 	// value and is directly usable as a Resolver (live HTTP DID resolution).
 	baseDir := &identity.BaseDirectory{}
@@ -117,12 +106,12 @@ func run(ctx context.Context) error {
 		persist,
 		resolver,
 		st,
-		poke,
+		sl.Poke,
 		log,
 	)
 
 	// Step 7: Build the admin API.
-	adminAPI := admin.NewAPI(registry, resolver, poke, cfg.AdminToken)
+	adminAPI := admin.NewAPI(registry, resolver, sl.Poke, cfg.AdminToken)
 
 	// Step 8: Build the HTTP server and wire consumer count callbacks.
 	retentionSecs := int64(cfg.RetentionWindow / time.Second)
