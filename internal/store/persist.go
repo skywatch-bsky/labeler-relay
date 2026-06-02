@@ -12,6 +12,15 @@ import (
 	bsky "github.com/bluesky-social/indigo/api/bsky"
 )
 
+// CursorState represents the status of a cursor relative to the retention window.
+type CursorState int
+
+const (
+	CursorOK CursorState = iota
+	CursorFuture
+	CursorOutdated
+)
+
 // IngestEvent is what the slurper (Phase 3) and firehose watcher (Phase 4)
 // hand to PersistIngest. Exported: it is the cross-package ingest entrypoint.
 type IngestEvent struct {
@@ -136,6 +145,105 @@ func (p *LabelPersist) PersistIngest(ctx context.Context, e IngestEvent) (relayS
 	}
 
 	return relaySeq, nil
+}
+
+// Playback queries all events with relay_seq > since in ascending order,
+// invoking cb for each LiveEvent. If cb returns an error, Playback stops early.
+// AC2.2: consumer connecting with cursor=N receives backfill from relay_seq > N.
+func (p *LabelPersist) Playback(ctx context.Context, since int64, cb func(LiveEvent) error) error {
+	rows, err := p.store.DB().QueryContext(ctx,
+		`SELECT relay_seq, kind, labeler_did, frame_cbor FROM events
+		 WHERE relay_seq > ? ORDER BY relay_seq ASC`,
+		since,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to query events for playback: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var seq int64
+		var kind string
+		var did string
+		var frameBytes []byte
+
+		if err := rows.Scan(&seq, &kind, &did, &frameBytes); err != nil {
+			return fmt.Errorf("failed to scan event: %w", err)
+		}
+
+		le := LiveEvent{
+			RelaySeq:   seq,
+			Kind:       kind,
+			LabelerDID: did,
+			FrameCBOR:  frameBytes,
+		}
+
+		if err := cb(le); err != nil {
+			return err
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating events: %w", err)
+	}
+
+	return nil
+}
+
+// Head returns the maximum relay_seq (the current head of the stream).
+// Returns 0 if no events exist.
+func (p *LabelPersist) Head(ctx context.Context) (int64, error) {
+	var seq int64
+	err := p.store.DB().QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(relay_seq), 0) FROM events`,
+	).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query head: %w", err)
+	}
+	return seq, nil
+}
+
+// RetentionFloor returns the minimum relay_seq (the oldest surviving event).
+// Returns 0 if no events exist. After prune, this represents the floor of
+// events available for playback.
+func (p *LabelPersist) RetentionFloor(ctx context.Context) (int64, error) {
+	var seq int64
+	err := p.store.DB().QueryRowContext(ctx,
+		`SELECT COALESCE(MIN(relay_seq), 0) FROM events`,
+	).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query retention floor: %w", err)
+	}
+	return seq, nil
+}
+
+// CursorStatus evaluates the given cursor against the retention window.
+// AC2.2: cursor in [floor-1, head] is OK (get backfill starting from cursor+1).
+// AC2.3: cursor > head is FutureCursor (client jumped ahead, wait for live).
+// AC2.4: cursor < floor-1 is OutdatedCursor (cursor is stale, resume from floor).
+func (p *LabelPersist) CursorStatus(ctx context.Context, cursor int64) (CursorState, error) {
+	head, err := p.Head(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	floor, err := p.RetentionFloor(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	// Cursor above head: future cursor
+	if cursor > head {
+		return CursorFuture, nil
+	}
+
+	// Cursor below floor-1: outdated
+	if floor > 0 && cursor < floor-1 {
+		return CursorOutdated, nil
+	}
+
+	// Otherwise: OK (cursor is valid within the retention window)
+	return CursorOK, nil
 }
 
 // timestampMs returns current time in milliseconds since epoch.
