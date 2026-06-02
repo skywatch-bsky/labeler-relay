@@ -2,9 +2,11 @@ package server_test
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	"github.com/scarndp/labeler-relay/internal/server"
@@ -189,9 +191,15 @@ func TestHubSlowConsumerDropped(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Condition-based wait: healthy sub must see all events (no sleep).
+	// Condition-based wait: healthy sub must see all events.
+	deadline := time.After(5 * time.Second)
 	for healthyCount.Load() < int64(total) {
-		// yield to scheduler
+		select {
+		case <-deadline:
+			t.Fatalf("timeout: healthy sub got %d of %d events", healthyCount.Load(), total)
+		default:
+			runtime.Gosched()
+		}
 	}
 
 	// Signal healthy drain goroutine to stop.

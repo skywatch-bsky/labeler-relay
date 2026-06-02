@@ -203,12 +203,16 @@ func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Channel closed: slow-consumer drop from Hub. Attempt to send error frame.
-	writeErr := writeWSFrame(conn, s.effectiveWriteTimeout(), func(w *frameWriter) error {
-		return WriteError(w, "ConsumerTooSlow", "consumer is too slow to keep up with the stream")
-	})
-	if writeErr != nil {
-		s.log.Debug("failed to write ConsumerTooSlow error frame", "err", writeErr)
+	// Channel closed: either slow-consumer drop from Hub, or context cancelled.
+	// Only send ConsumerTooSlow if the context was NOT cancelled (i.e. this was
+	// a genuine slow-consumer drop, not a client disconnect).
+	if ctx.Err() == nil {
+		writeErr := writeWSFrame(conn, s.effectiveWriteTimeout(), func(w *frameWriter) error {
+			return WriteError(w, "ConsumerTooSlow", "consumer is too slow to keep up with the stream")
+		})
+		if writeErr != nil {
+			s.log.Debug("failed to write ConsumerTooSlow error frame", "err", writeErr)
+		}
 	}
 }
 
