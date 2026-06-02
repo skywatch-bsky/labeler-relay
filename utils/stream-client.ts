@@ -63,14 +63,14 @@ ws.on("message", (data: Buffer) => {
         labels: Array<Record<string, unknown>>;
       };
       const line = JSON.stringify({
-        type,
+        type: "label",
         seq,
         src,
-        upstreamSeq,
-        labels: labels.map((l) => ({
-          $type: "com.atproto.label.defs#label",
-          ...toJSON(l) as object,
-        })),
+        record: {
+          $type: "com.atproto.label.subscribeLabels#labels",
+          seq: upstreamSeq,
+          labels: labels.map((l) => toJSON(l)),
+        },
       });
       process.stdout.write(line + "\n");
       break;
@@ -84,7 +84,7 @@ ws.on("message", (data: Buffer) => {
         record: Record<string, unknown> | null;
       };
       const line = JSON.stringify({
-        type,
+        type: "service",
         seq,
         src,
         op: serviceOp,

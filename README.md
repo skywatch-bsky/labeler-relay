@@ -49,38 +49,43 @@ ws://localhost:8080/xrpc/community.labeler.sync.subscribeLabelers?cursor=100
 
 Connect with no cursor for live-only. Connect with `cursor=N` to backfill from `seq > N`, then seamlessly continue live. The stream emits three frame types:
 
-**`#labels`** — relayed labels from an upstream labeler:
+**`label`** — relayed labels from an upstream labeler:
 
 ```json
 {
+  "type": "label",
   "seq": 42,
   "src": "did:plc:ar7c4by46qjdydhdevvrndac",
-  "upstreamSeq": 35916330,
-  "labels": [
-    {
-      "src": "did:plc:ar7c4by46qjdydhdevvrndac",
-      "uri": "at://did:plc:example/app.bsky.feed.post/abc123",
-      "cid": "bafyrei...",
-      "val": "porn",
-      "cts": "2026-06-02T14:05:50.164Z",
-      "neg": false,
-      "ver": 1,
-      "sig": "<bytes>"
-    }
-  ]
+  "record": {
+    "$type": "com.atproto.label.subscribeLabels#labels",
+    "seq": 35916330,
+    "labels": [
+      {
+        "src": "did:plc:ar7c4by46qjdydhdevvrndac",
+        "uri": "at://did:plc:example/app.bsky.feed.post/abc123",
+        "cid": "bafyrei...",
+        "val": "porn",
+        "cts": "2026-06-02T14:05:50.164Z",
+        "ver": 1,
+        "sig": { "$bytes": "base64..." }
+      }
+    ]
+  }
 }
 ```
 
-Each label is a complete `com.atproto.label.defs#label` record, passed through with all fields intact.
+Top-level `seq` is the relay-minted sequence. `record.seq` is the upstream labeler's sequence. Each label inside `record.labels` is a complete `com.atproto.label.defs#label` passed through with all fields intact.
 
-**`#service`** — a labeler's service declaration was created, updated, or deleted:
+**`service`** — a labeler's service declaration was created, updated, or deleted:
 
 ```json
 {
+  "type": "service",
   "seq": 43,
   "src": "did:plc:example",
   "op": "create",
   "record": {
+    "$type": "app.bsky.labeler.service",
     "policies": { "labelValues": ["spam", "nsfw"], "labelValueDefinitions": [...] },
     "createdAt": "2026-06-01T00:00:00Z",
     "reasonTypes": [...],
@@ -90,12 +95,13 @@ Each label is a complete `com.atproto.label.defs#label` record, passed through w
 }
 ```
 
-The record is a complete `app.bsky.labeler.service` with all fields. Absent for `"op": "delete"`.
+The record is a complete `app.bsky.labeler.service` with all fields. `record` is null for `"op": "delete"`.
 
-**`#info`** — control frame (e.g. cursor below the retention floor):
+**`info`** — control frame (e.g. cursor below the retention floor):
 
 ```json
 {
+  "type": "info",
   "name": "OutdatedCursor",
   "message": "cursor is before retention floor"
 }

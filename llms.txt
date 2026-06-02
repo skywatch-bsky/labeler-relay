@@ -1,0 +1,222 @@
+# labeler-relay deployment guide
+
+## What this is
+
+A Go service that aggregates AT Protocol labeler streams into one WebSocket output. It connects to hundreds of upstream labelers, re-sequences their labels under a single monotonic cursor, and serves them at `community.labeler.sync.subscribeLabelers`. Labels are passed through byte-faithfully (signatures intact). State is stored in a single SQLite database file.
+
+## Build
+
+Requires Go 1.26+.
+
+```bash
+git clone https://github.com/scarndp/labeler-relay.git
+cd labeler-relay
+go build -o labeler-relay ./cmd/labeler-relay/
+```
+
+The output is a single static binary. No runtime dependencies.
+
+## Required environment variables
+
+Only one is strictly required:
+
+```
+LABELER_RELAY_ADMIN_TOKEN=<a-secret-bearer-token>
+```
+
+This token authenticates all `/admin/*` API calls. Generate something random (e.g. `openssl rand -hex 32`).
+
+## All environment variables
+
+```
+LABELER_RELAY_DB_PATH=labeler-relay.db
+LABELER_RELAY_LISTEN_ADDR=:8080
+LABELER_RELAY_FIREHOSE_URL=wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos
+LABELER_RELAY_ADMIN_TOKEN=<required>
+LABELER_RELAY_RETENTION_WINDOW=336h
+LABELER_RELAY_REQUIRE_SIG=true
+LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED=true
+LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC=50
+LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR=10000
+```
+
+Defaults are shown. The only one without a default is `LABELER_RELAY_ADMIN_TOKEN`.
+
+`LABELER_RELAY_RETENTION_WINDOW` supports Go durations (`336h`) and day shorthand (`14d`).
+
+## Running
+
+```bash
+LABELER_RELAY_ADMIN_TOKEN=your-token ./labeler-relay
+```
+
+On startup, the relay:
+1. Opens (or creates) the SQLite database at `LABELER_RELAY_DB_PATH`.
+2. Starts the HTTP server on `LABELER_RELAY_LISTEN_ADDR`.
+3. Connects to the AT Protocol firehose to auto-discover labelers.
+4. Reconnects to any labelers already in the database from a previous run.
+5. Begins serving the output WebSocket stream.
+
+The process runs until killed. SIGINT and SIGTERM trigger graceful shutdown.
+
+## Persistence
+
+All state is in the SQLite database file (`labeler-relay.db` by default). This includes:
+- The labeler registry (DIDs, endpoints, enabled/disabled state).
+- All ingested events within the retention window.
+- Per-labeler upstream resume cursors.
+- The firehose resume cursor.
+
+The database persists across restarts. After a restart, the relay resumes each upstream labeler from its last cursor position (at-least-once delivery). No data is lost.
+
+Back up the database file to preserve state. The relay uses WAL mode, so you can copy the `.db`, `.db-wal`, and `.db-shm` files together for a consistent backup.
+
+## TLS / reverse proxy
+
+The relay serves plain HTTP/WS only. For HTTPS/WSS, put a reverse proxy in front.
+
+Example with Caddy (automatic TLS):
+```
+relay.example.com {
+    reverse_proxy localhost:8080
+}
+```
+
+Example with nginx:
+```nginx
+server {
+    listen 443 ssl;
+    server_name relay.example.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}
+```
+
+The `proxy_read_timeout` and `proxy_send_timeout` must be long (24h+) because the WebSocket connections are long-lived.
+
+## Seeding labelers
+
+On a fresh deploy, the firehose watcher will auto-discover labelers as they create or update `app.bsky.labeler.service` records. This catches new labelers immediately but won't find existing ones that haven't changed recently.
+
+To seed existing labelers, use the admin API:
+
+```bash
+curl -X POST https://relay.example.com/admin/labelers \
+  -H "Authorization: Bearer $LABELER_RELAY_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"did": "did:plc:ar7c4by46qjdydhdevvrndac"}'
+```
+
+The relay resolves the labeler's WebSocket endpoint from its DID document. If the DID doesn't have an `atproto_labeler` service endpoint, the request returns 400.
+
+For bulk import, a script is included:
+
+```bash
+./scripts/import-labelers.sh labelers.csv https://relay.example.com $LABELER_RELAY_ADMIN_TOKEN
+```
+
+The CSV needs a `did` column. If a `visibility` column is present, only `Declared` rows are imported. A CSV of all known labelers can be scraped from https://labelwatch.neutral.zone.
+
+## Health and monitoring
+
+Health check:
+```bash
+curl https://relay.example.com/_health
+```
+
+Returns JSON with `head_seq`, `labeler_count`, `retention_floor`, `retention_window_seconds`.
+
+Prometheus metrics:
+```
+GET /metrics
+```
+
+Includes per-labeler ingest rates, dropped unsigned label counts, connected upstream count, consumer count, head seq gauge, retention floor gauge, and throttle events.
+
+## Endpoints summary
+
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/xrpc/community.labeler.sync.subscribeLabelers` | WS | No | Output stream (labels, service records, info frames) |
+| `/_health` | GET | No | Health check JSON |
+| `/metrics` | GET | No | Prometheus metrics |
+| `/admin/labelers` | POST | Bearer | Add a labeler by DID |
+| `/admin/labelers` | GET | Bearer | List all labelers |
+| `/admin/labelers/{did}` | DELETE | Bearer | Disable a labeler |
+| `/admin/labelers/{did}/enable` | POST | Bearer | Enable a labeler |
+| `/admin/labelers/{did}/disable` | POST | Bearer | Disable a labeler |
+
+## Systemd example
+
+```ini
+[Unit]
+Description=labeler-relay
+After=network.target
+
+[Service]
+Type=simple
+User=labeler-relay
+ExecStart=/opt/labeler-relay/labeler-relay
+Environment=LABELER_RELAY_ADMIN_TOKEN=your-token
+Environment=LABELER_RELAY_DB_PATH=/var/lib/labeler-relay/labeler-relay.db
+Environment=LABELER_RELAY_LISTEN_ADDR=:8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Docker
+
+```dockerfile
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY . .
+RUN go build -o /labeler-relay ./cmd/labeler-relay/
+
+FROM gcr.io/distroless/base-debian12
+COPY --from=build /labeler-relay /labeler-relay
+ENTRYPOINT ["/labeler-relay"]
+```
+
+```bash
+docker build -t labeler-relay .
+docker run -d \
+  -e LABELER_RELAY_ADMIN_TOKEN=your-token \
+  -e LABELER_RELAY_DB_PATH=/data/labeler-relay.db \
+  -v labeler-relay-data:/data \
+  -p 8080:8080 \
+  labeler-relay
+```
+
+Mount a volume at `/data` so the SQLite database persists across container restarts.
+
+## Resource requirements
+
+The relay is lightweight. For hundreds of labelers:
+- CPU: 1 core is plenty. The bottleneck is network I/O, not compute.
+- Memory: ~100-200MB RSS under load.
+- Disk: depends on retention window and label volume. At current network rates (~300k labels/week), expect ~50-100MB per week of retention. The default 14-day window stays well under 1GB.
+- Network: outbound WebSocket connections to each upstream labeler plus the firehose. Inbound connections from consumers.
+
+## Troubleshooting
+
+**Relay starts but no labels appear:** Check `/_health` — if `labeler_count` is 0, no labelers are registered. Either wait for firehose auto-discovery or seed via the admin API.
+
+**"failed to resolve endpoint" when adding a labeler:** The DID doesn't have an `atproto_labeler` service endpoint in its DID document. The labeler may have been deactivated or never declared itself as a labeler.
+
+**Database locked errors:** The relay expects to be the only process writing to the database. Don't run two instances against the same DB file.
+
+**Consumer disconnected unexpectedly:** Slow consumers are dropped when their buffer fills (default 512 events). This prevents one slow consumer from blocking the write path. The consumer should reconnect with its last cursor to resume.
