@@ -62,7 +62,6 @@ func TestN2LiveAggregation(t *testing.T) {
 		didMod:      modKey,
 		didSkywatch: skywatchKey,
 	}
-	_ = keyBySrc
 
 	// Step 2: Boot the relay and register both labelers.
 	t.Log("booting relay harness...")
@@ -243,7 +242,8 @@ func collectUntilBothOrigins(t *testing.T, h *e2e.Harness, deadline time.Duratio
 					)}
 					return
 				}
-				// Transient error — retry with same n.
+				// Transient error — backoff then retry with same n.
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
