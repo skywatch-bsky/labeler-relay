@@ -8,9 +8,9 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-// TestFirehoseWatcherStructure tests that FirehoseWatcher can be instantiated.
-func TestFirehoseWatcherStructure(t *testing.T) {
-	// Create test store in a file path.
+// TestFirehoseWatcherCreation tests that FirehoseWatcher can be created with proper dependencies.
+func TestFirehoseWatcherCreation(t *testing.T) {
+	// Create test store.
 	tempDir := t.TempDir()
 	dbPath := tempDir + "/test.db"
 	s, err := store.Open(dbPath)
@@ -25,30 +25,24 @@ func TestFirehoseWatcherStructure(t *testing.T) {
 	// Create a fake DID resolver.
 	fakeDIDResolver := &fakeDIDResolver{
 		endpoints: map[string]string{
-			"did:plc:labeler1": "https://example.com/labeler",
+			"did:plc:labeler1": "https://labeler1.example.com/xrpc/com.atproto.label.subscribeLabels",
 		},
-	}
-
-	// Create a poke function.
-	pokeFunc := func() {
-		// no-op for test
 	}
 
 	// Create the watcher.
 	log := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil))
 	watcher := NewFirehoseWatcher(
-		"http://example.com/firehose",
+		"http://unused.example.com",
 		registry,
 		persist,
 		fakeDIDResolver,
 		s,
-		pokeFunc,
+		func() {},
 		log,
 	)
 
-	// Just verify it's creatable (full integration test would require real server).
+	// Verify it was created successfully.
 	if watcher == nil {
-		t.Fatal("watcher should not be nil")
+		t.Fatal("FirehoseWatcher should not be nil")
 	}
 }
-
