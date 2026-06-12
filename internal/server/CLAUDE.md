@@ -29,7 +29,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - StreamFrom's dedup boundary relies on relay_seq monotonicity: if persist ever minted non-monotonic seqs, dedup would break
 - Hub subscriber IDs are monotonically increasing integers (never reused within a process lifetime)
 - Frame body bytes are written verbatim from store -- never re-encoded at the server layer
-- /_health always returns 200 with JSON (head_seq, labeler_count, retention_floor, retention_window_seconds)
+- /_health returns 200 with JSON (head_seq, labeler_count, retention_floor, retention_window_seconds) on success; 500 if a store read fails
 
 ## Key Files
 - `subscribe.go` - HandleSubscribeLabelers: cursor validation, WS upgrade, stream loop

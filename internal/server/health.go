@@ -18,7 +18,8 @@ type healthResponse struct {
 }
 
 // HandleHealth reports the current stream head, labeler count, retention floor,
-// and configured retention window. It always returns 200 OK with a JSON body.
+// and configured retention window. Returns 200 with a JSON body on success,
+// 500 if any of the underlying store reads fail.
 func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 

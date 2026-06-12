@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS events (
     labeler_did  TEXT    NOT NULL,
     upstream_seq INTEGER,
     frame_cbor   BLOB    NOT NULL,
-    ingest_ts    INTEGER NOT NULL
+    ingest_ts    INTEGER NOT NULL -- milliseconds since epoch (prune cutoff)
 );
 CREATE INDEX IF NOT EXISTS idx_events_ingest_ts ON events (ingest_ts);
 
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS labelers (
     require_sig      INTEGER,
     last_upstream_seq INTEGER,
     last_error       TEXT,
-    updated_at       INTEGER NOT NULL
+    updated_at       INTEGER NOT NULL -- unix SECONDS (unlike events.ingest_ts, which is milliseconds)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
