@@ -380,4 +380,41 @@ func TestRegistry(t *testing.T) {
 			t.Error("expected exists=false for missing labeler")
 		}
 	})
+
+	t.Run("Successful upsert clears a previously recorded error", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		s, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		defer s.Close()
+
+		reg := store.NewLabelerRegistry(s)
+
+		const did = "did:plc:errored-then-resolved"
+
+		// Discovery fails first: a minimal disabled row with an error.
+		if err := reg.RecordError(ctx, did, "no atproto_labeler service endpoint"); err != nil {
+			t.Fatalf("RecordError failed: %v", err)
+		}
+
+		// Discovery later succeeds: the upsert must clear the stale error.
+		if err := reg.Upsert(ctx, store.Labeler{
+			DID:       did,
+			Endpoint:  "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels",
+			Source:    "firehose",
+			Enabled:   true,
+			UpdatedAt: 1234567890,
+		}); err != nil {
+			t.Fatalf("Upsert failed: %v", err)
+		}
+
+		got, exists, err := reg.Get(ctx, did)
+		if err != nil || !exists {
+			t.Fatalf("Get failed: exists=%v err=%v", exists, err)
+		}
+		if got.LastError != "" {
+			t.Errorf("expected last_error cleared after successful upsert, got %q", got.LastError)
+		}
+	})
 }

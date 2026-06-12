@@ -48,13 +48,16 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 	// preserving operator-controlled source and enabled. Manual upserts claim
 	// the row: they additionally take over source and enabled so an operator
 	// add always yields the requested state, even when the row was previously
-	// inserted disabled by discovery (e.g. via RecordError). Cursor, sig
-	// policy, and last_error are preserved in both cases.
+	// inserted disabled by discovery (e.g. via RecordError). Cursor and sig
+	// policy are preserved in both cases. A successful upsert clears
+	// last_error: the row resolved cleanly, so any prior discovery error is
+	// stale.
 	query := `
 		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(did) DO UPDATE SET
 			endpoint = excluded.endpoint,
+			last_error = NULL,
 			updated_at = excluded.updated_at
 	`
 	if labeler.Source == "manual" {
@@ -65,6 +68,7 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 			endpoint = excluded.endpoint,
 			source = excluded.source,
 			enabled = excluded.enabled,
+			last_error = NULL,
 			updated_at = excluded.updated_at
 	`
 	}
