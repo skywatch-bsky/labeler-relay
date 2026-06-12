@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/rand"
 	"net/url"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/bluesky-social/indigo/cmd/relay/stream"
 	"github.com/bluesky-social/indigo/cmd/relay/stream/schedulers/sequential"
 	"github.com/gorilla/websocket"
+	"github.com/scarndp/labeler-relay/internal/backoff"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
@@ -76,8 +76,7 @@ func NewFirehoseWatcher(
 // Run starts the redial loop, consuming firehose commits.
 // Blocks until ctx is cancelled.
 func (w *FirehoseWatcher) Run(ctx context.Context) error {
-	backoffMs := 100
-	const maxBackoffMs = 30000
+	backoffMs := 0
 
 	for {
 		select {
@@ -86,7 +85,9 @@ func (w *FirehoseWatcher) Run(ctx context.Context) error {
 		default:
 		}
 
+		dialStart := time.Now()
 		err := w.dial(ctx)
+		connectedFor := time.Since(dialStart)
 		if err == context.Canceled || err == context.DeadlineExceeded {
 			return err
 		}
@@ -95,20 +96,21 @@ func (w *FirehoseWatcher) Run(ctx context.Context) error {
 			w.log.Error("firehose dial failed", "err", err)
 		}
 
-		// Exponential backoff with jitter.
+		// Exponential backoff with jitter. A connection that survived past
+		// the reset threshold restarts the sequence from the initial delay.
+		backoffMs = backoff.NextMs(backoffMs, connectedFor)
 		maxJitter := int(float64(backoffMs) * 0.1)
 		if maxJitter < 1 {
 			maxJitter = 1
 		}
 		jitter := rand.Intn(maxJitter)
 		sleepMs := backoffMs + jitter
-		if sleepMs > maxBackoffMs {
-			sleepMs = maxBackoffMs
+		if sleepMs > backoff.MaxMs {
+			sleepMs = backoff.MaxMs
 		}
 
 		select {
 		case <-time.After(time.Duration(sleepMs) * time.Millisecond):
-			backoffMs = int(math.Min(float64(backoffMs)*2, float64(maxBackoffMs)))
 		case <-ctx.Done():
 			return ctx.Err()
 		}
