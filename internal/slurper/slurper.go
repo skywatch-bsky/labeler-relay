@@ -235,6 +235,7 @@ func (s *LabelSlurper) Shutdown() {
 
 	for did, sc := range s.active {
 		sc.cancel()
+		sc.sub.limiter.Close()
 		s.log.Info("cancelled subscription", "labeler", did)
 	}
 	s.active = make(map[string]*subscriptionContext)
