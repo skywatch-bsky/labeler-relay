@@ -101,6 +101,42 @@ func TestLoad_ValidationErrors(t *testing.T) {
 		_, err := config.Load()
 		require.Error(t, err)
 	})
+
+	t.Run("malformed require_sig bool", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_REQUIRE_SIG", "yes-please")
+		_, err := config.Load()
+		require.Error(t, err, "malformed bool must fail loud, not fall back to default")
+		require.Contains(t, err.Error(), "require_sig")
+	})
+
+	t.Run("malformed auto_subscribe_discovered bool", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED", "nope")
+		_, err := config.Load()
+		require.Error(t, err, "malformed bool must fail loud, not fall back to default")
+		require.Contains(t, err.Error(), "auto_subscribe_discovered")
+	})
+
+	t.Run("malformed per_sec rate limit", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC", "five-hundred")
+		_, err := config.Load()
+		require.Error(t, err, "malformed int must fail loud, not fall back to default")
+		require.Contains(t, err.Error(), "per_sec")
+	})
+
+	t.Run("malformed per_hour rate limit", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR", "100k")
+		_, err := config.Load()
+		require.Error(t, err, "malformed int must fail loud, not fall back to default")
+		require.Contains(t, err.Error(), "per_hour")
+	})
 }
 
 // TestLoad_RetentionWindowFormats verifies that various duration formats parse correctly.

@@ -38,15 +38,23 @@ type Config struct {
 // libraries — per house style.
 func Load() (Config, error) {
 	cfg := Config{
-		DBPath:                  getEnvOr("LABELER_RELAY_DB_PATH", "labeler-relay.db"),
-		ListenAddr:              getEnvOr("LABELER_RELAY_LISTEN_ADDR", ":8080"),
-		FirehoseURL:             getEnvOr("LABELER_RELAY_FIREHOSE_URL", "wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos"),
-		AdminToken:              os.Getenv("LABELER_RELAY_ADMIN_TOKEN"),
-		AutoSubscribeDiscovered: parseBoolOr("LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED", true),
-		RequireSig:              parseBoolOr("LABELER_RELAY_REQUIRE_SIG", true),
+		DBPath:      getEnvOr("LABELER_RELAY_DB_PATH", "labeler-relay.db"),
+		ListenAddr:  getEnvOr("LABELER_RELAY_LISTEN_ADDR", ":8080"),
+		FirehoseURL: getEnvOr("LABELER_RELAY_FIREHOSE_URL", "wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos"),
+		AdminToken:  os.Getenv("LABELER_RELAY_ADMIN_TOKEN"),
 	}
 
 	var err error
+
+	cfg.AutoSubscribeDiscovered, err = parseBoolEnv("LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED", "auto_subscribe_discovered", true)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cfg.RequireSig, err = parseBoolEnv("LABELER_RELAY_REQUIRE_SIG", "require_sig", true)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
+	}
 
 	// Parse retention window.
 	retentionStr := getEnvOr("LABELER_RELAY_RETENTION_WINDOW", "336h") // 14 days
@@ -56,9 +64,14 @@ func Load() (Config, error) {
 	}
 
 	// Parse rate limits.
-	cfg.UpstreamRateLimit = RateLimit{
-		PerSec:  parseIntOr("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC", 500),
-		PerHour: parseIntOr("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR", 100000),
+	cfg.UpstreamRateLimit.PerSec, err = parseIntEnv("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC", "upstream_rate_limit.per_sec", 500)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cfg.UpstreamRateLimit.PerHour, err = parseIntEnv("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR", "upstream_rate_limit.per_hour", 100000)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
 	}
 
 	if err := validate(cfg); err != nil {
@@ -94,30 +107,32 @@ func getEnvOr(key, fallback string) string {
 	return fallback
 }
 
-// parseBoolOr parses a boolean env var, returning the fallback if unset or unparseable.
-func parseBoolOr(key string, fallback bool) bool {
+// parseBoolEnv parses a boolean env var, returning the fallback if unset and
+// an error (using the lowercase field name) if the value is unparseable.
+func parseBoolEnv(key, field string, fallback bool) (bool, error) {
 	v := os.Getenv(key)
 	if v == "" {
-		return fallback
+		return fallback, nil
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
-		return fallback
+		return false, fmt.Errorf("invalid %s %q: %w", field, v, err)
 	}
-	return b
+	return b, nil
 }
 
-// parseIntOr parses an integer env var, returning the fallback if unset or unparseable.
-func parseIntOr(key string, fallback int) int {
+// parseIntEnv parses an integer env var, returning the fallback if unset and
+// an error (using the lowercase field name) if the value is unparseable.
+func parseIntEnv(key, field string, fallback int) (int, error) {
 	v := os.Getenv(key)
 	if v == "" {
-		return fallback
+		return fallback, nil
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("invalid %s %q: %w", field, v, err)
 	}
-	return n
+	return n, nil
 }
 
 // parseDuration parses a duration string, supporting Go's time.ParseDuration
