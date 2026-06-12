@@ -107,6 +107,7 @@ func run(ctx context.Context) error {
 		resolver,
 		st,
 		sl.Poke,
+		cfg.AutoSubscribeDiscovered,
 		log,
 	)
 

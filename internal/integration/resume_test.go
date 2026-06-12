@@ -465,6 +465,7 @@ func TestResumeFirehose(t *testing.T) {
 		"ws://"+fakeServer1.server.Listener.Addr().String()+"/xrpc/com.atproto.sync.subscribeRepos",
 		registry, persist, resolver, s,
 		func() {},
+		true,
 		discardLog(),
 	)
 	// Use a flush threshold of 1 so the cursor is written on the very first commit.
@@ -520,6 +521,7 @@ func TestResumeFirehose(t *testing.T) {
 		"ws://"+fakeServer2.server.Listener.Addr().String()+"/xrpc/com.atproto.sync.subscribeRepos",
 		store.NewLabelerRegistry(s), store.NewLabelPersist(s), resolver, s,
 		func() {},
+		true,
 		discardLog(),
 	)
 
