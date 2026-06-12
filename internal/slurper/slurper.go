@@ -66,8 +66,9 @@ func New(
 }
 
 // Reconcile syncs the active subscriptions with the enabled labelers in the registry.
-// It starts new subscriptions for enabled labelers not yet active, and cancels
-// subscriptions for labelers that are no longer enabled.
+// It starts new subscriptions for enabled labelers not yet active, restarts
+// subscriptions whose endpoint or sig policy changed in the registry, and
+// cancels subscriptions for labelers that are no longer enabled.
 // Reconcile is idempotent: calling twice with no registry change is a no-op.
 func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 	// Fetch enabled labelers from registry.
@@ -83,6 +84,23 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 	enabledSet := make(map[string]struct{})
 	for _, labeler := range enabled {
 		enabledSet[labeler.DID] = struct{}{}
+	}
+
+	// Restart subscriptions whose registry config changed (e.g. the labeler
+	// moved hosts): cancel the stale subscription so the loop below starts a
+	// fresh one against the current endpoint and sig policy.
+	for _, labeler := range enabled {
+		sc, exists := s.active[labeler.DID]
+		if !exists || !SubscriptionConfigChanged(sc.sub.labeler, labeler) {
+			continue
+		}
+		sc.cancel()
+		sc.sub.limiter.Close()
+		delete(s.active, labeler.DID)
+		s.log.Info("restarting subscription for config change",
+			"labeler", labeler.DID,
+			"old_endpoint", sc.sub.labeler.Endpoint,
+			"new_endpoint", labeler.Endpoint)
 	}
 
 	// Start subscriptions for newly enabled labelers.

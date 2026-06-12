@@ -9,6 +9,7 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 - **Exposes**: `LabelSlurper` (New, Run, Reconcile, Shutdown), `Limiter` (per-labeler rate limiter), `SigRequired`/`KeepLabel` (pure policy functions)
 - **Guarantees**:
   - One goroutine per enabled labeler; Reconcile is idempotent
+  - Reconcile restarts a subscription when its registry config (endpoint, require_sig) changed -- `SubscriptionConfigChanged` in policy.go is the diff
   - Subscriptions resume from persisted `last_upstream_seq` cursor
   - Cursor is written after successful persist (crash-safe ordering)
   - Labels are passed through byte-faithful (unmodified) -- the relay never re-signs
