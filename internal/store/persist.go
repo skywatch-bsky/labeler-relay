@@ -52,13 +52,20 @@ type LabelPersist struct {
 	mu             sync.Mutex     // serializes seq minting; single-writer
 	broadcaster    func(LiveEvent)
 	onHeadAdvanced func(float64)  // called after each successful persist with the new seq
+	pruneBatchSize int
 }
+
+// defaultPruneBatchSize bounds how many rows a single prune DELETE may touch,
+// and therefore how long prune holds the SQLite write lock before yielding
+// to PersistIngest. Must stay well under what busy_timeout(5000) can absorb.
+const defaultPruneBatchSize = 5000
 
 // NewLabelPersist creates a new LabelPersist backed by the given store.
 func NewLabelPersist(s *Store) *LabelPersist {
 	return &LabelPersist{
-		store:       s,
-		broadcaster: nil,
+		store:          s,
+		broadcaster:    nil,
+		pruneBatchSize: defaultPruneBatchSize,
 	}
 }
 
@@ -270,33 +277,50 @@ func (p *LabelPersist) CursorStatus(ctx context.Context, cursor int64) (CursorSt
 	return CursorOK, nil
 }
 
-// Prune deletes all events with ingest_ts < olderThanMillis.
+// Prune deletes all events with ingest_ts < olderThanMillis, in batches of
+// pruneBatchSize rows. Each batch is its own implicit transaction, so the
+// SQLite write lock is released between batches and concurrent PersistIngest
+// calls are never starved past busy_timeout by one large delete.
 // Returns the number of rows deleted and the new retention floor.
 // AC6.1: Events older than the configured window are pruned and the retention floor advances.
 // AC6.2: Both #labels and #service events are subject to the same window (no kind filter).
 // AC3.3: AUTOINCREMENT guarantees seq never reuses after prune, even after restart.
 func (p *LabelPersist) Prune(ctx context.Context, olderThanMillis int64) (deleted int64, newFloor int64, err error) {
-	// Delete all events older than cutoff
-	result, err := p.store.DB().ExecContext(ctx,
-		`DELETE FROM events WHERE ingest_ts < ?`,
-		olderThanMillis,
-	)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to prune events: %w", err)
-	}
+	// The IN-subquery form bounds the delete without requiring a SQLite build
+	// with SQLITE_ENABLE_UPDATE_DELETE_LIMIT; the subquery scan is served by
+	// idx_events_ingest_ts.
+	for {
+		if err := ctx.Err(); err != nil {
+			return deleted, 0, err
+		}
 
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to check rows affected: %w", err)
+		result, err := p.store.DB().ExecContext(ctx,
+			`DELETE FROM events WHERE relay_seq IN (
+			   SELECT relay_seq FROM events WHERE ingest_ts < ? LIMIT ?)`,
+			olderThanMillis, p.pruneBatchSize,
+		)
+		if err != nil {
+			return deleted, 0, fmt.Errorf("failed to prune events: %w", err)
+		}
+
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return deleted, 0, fmt.Errorf("failed to check rows affected: %w", err)
+		}
+		deleted += affected
+
+		if affected < int64(p.pruneBatchSize) {
+			break
+		}
 	}
 
 	// Query the new floor
 	newFloor, err = p.RetentionFloor(ctx)
 	if err != nil {
-		return 0, 0, err
+		return deleted, 0, err
 	}
 
-	return affected, newFloor, nil
+	return deleted, newFloor, nil
 }
 
 // timestampMs returns current time in milliseconds since epoch.
