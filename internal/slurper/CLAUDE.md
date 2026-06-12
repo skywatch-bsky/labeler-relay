@@ -9,8 +9,9 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 - **Exposes**: `LabelSlurper` (New, Run, Reconcile, Shutdown), `Limiter` (per-labeler rate limiter), `SigRequired`/`KeepLabel` (pure policy functions)
 - **Guarantees**:
   - One goroutine per enabled labeler; Reconcile is idempotent
+  - Reconcile restarts a subscription when its registry config (endpoint, require_sig) changed -- `SubscriptionConfigChanged` in policy.go is the diff
   - Subscriptions resume from persisted `last_upstream_seq` cursor
-  - Cursor is written after successful persist (crash-safe ordering)
+  - Cursor is written after successful persist (crash-safe ordering); a frame whose labels are all dropped by sig policy still advances the cursor (nothing to lose on crash)
   - Labels are passed through byte-faithful (unmodified) -- the relay never re-signs
   - Rate limiting is per-labeler, never cross-labeler
 - **Expects**: Registry returns enabled labelers with valid endpoints. Persist never blocks indefinitely.
@@ -22,12 +23,12 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 
 ## Key Decisions
 - Indigo's `sequential.NewScheduler` + `HandleRepoStream` for frame parsing: reuses battle-tested upstream WS consumer rather than hand-rolling.
-- Exponential backoff with 10% jitter, capped at 30s: prevents thundering herd on upstream recovery.
+- Exponential backoff with 10% jitter, capped at 30s: prevents thundering herd on upstream recovery. Backoff policy is `internal/backoff` (shared with firehose); a connection surviving 30s resets the sequence.
 - Sliding window rate limiter (per-sec + per-hour): two-tier protection against burst and sustained flood.
 
 ## Invariants
 - `subscription.run` blocks until context cancellation -- it never returns nil on its own
-- Backoff resets are implicit: a successful dial resets the loop but the backoff variable persists per dial cycle (capped at max)
+- Backoff resets when a connection survives `backoff.ResetAfter` (30s); short-lived dial cycles keep doubling up to the cap
 - `KeepLabel` is a pure function: label is kept if it has a sig OR sig is not required
 
 ## Key Files
@@ -38,4 +39,4 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 
 ## Gotchas
 - All metrics in subscription.go flow through injected callbacks (onDropUnsigned, onIngested), matching the FCIS callback pattern used across the codebase.
-- The limiter's `Wait` polls at 10ms intervals -- not event-driven. Acceptable for label throughput but would need rework for high-volume use.
+- The limiter's `Wait` polls at 10ms intervals -- not event-driven. Acceptable for label throughput but would need rework for high-volume use. The throttled callback fires once per blocked `Wait`, not per poll iteration.

@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/rand"
 	"net/url"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/bluesky-social/indigo/cmd/relay/stream"
 	"github.com/bluesky-social/indigo/cmd/relay/stream/schedulers/sequential"
 	"github.com/gorilla/websocket"
+	"github.com/scarndp/labeler-relay/internal/backoff"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
@@ -32,8 +32,7 @@ type subscription struct {
 
 // run starts the subscription loop with redial + backoff. It blocks until ctx is cancelled.
 func (s *subscription) run(ctx context.Context) error {
-	backoffMs := 100
-	const maxBackoffMs = 30000
+	backoffMs := 0
 
 	for {
 		select {
@@ -42,7 +41,9 @@ func (s *subscription) run(ctx context.Context) error {
 		default:
 		}
 
+		dialStart := time.Now()
 		err := s.dial(ctx)
+		connectedFor := time.Since(dialStart)
 		if err == context.Canceled || err == context.DeadlineExceeded {
 			return err
 		}
@@ -51,22 +52,22 @@ func (s *subscription) run(ctx context.Context) error {
 			s.log.Error("subscription dial failed", "labeler", s.labeler.DID, "err", err)
 		}
 
-		// Compute next backoff with jitter.
+		// Compute next backoff with jitter. A connection that survived past
+		// the reset threshold restarts the sequence from the initial delay.
+		backoffMs = backoff.NextMs(backoffMs, connectedFor)
 		maxJitter := int(float64(backoffMs) * 0.1)
 		if maxJitter < 1 {
 			maxJitter = 1
 		}
 		jitter := rand.Intn(maxJitter)
 		sleepMs := backoffMs + jitter
-		if sleepMs > maxBackoffMs {
-			sleepMs = maxBackoffMs
+		if sleepMs > backoff.MaxMs {
+			sleepMs = backoff.MaxMs
 		}
 
 		// Sleep with context awareness.
 		select {
 		case <-time.After(time.Duration(sleepMs) * time.Millisecond):
-			// Exponential backoff.
-			backoffMs = int(math.Min(float64(backoffMs)*2, float64(maxBackoffMs)))
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -159,6 +160,12 @@ func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.Label
 	}
 
 	if len(kept) == 0 {
+		// Nothing to persist, but the frame was fully consumed: advance the
+		// cursor so redials resume from here instead of replaying the backlog.
+		// Safe without a persist -- there is nothing to lose on crash.
+		if err := s.registry.WriteCursor(ctx, s.labeler.DID, evt.Seq); err != nil {
+			return fmt.Errorf("failed to flush cursor: %w", err)
+		}
 		return nil
 	}
 

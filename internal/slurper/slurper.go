@@ -39,6 +39,7 @@ type LabelSlurper struct {
 	pokeCh chan struct{} // capacity-1 signal; multiple Poke() calls collapse into one Reconcile
 	mu     sync.Mutex
 	active map[string]*subscriptionContext // keyed by labeler DID
+	wg     sync.WaitGroup                  // tracks subscription goroutines for Shutdown join
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -66,8 +67,9 @@ func New(
 }
 
 // Reconcile syncs the active subscriptions with the enabled labelers in the registry.
-// It starts new subscriptions for enabled labelers not yet active, and cancels
-// subscriptions for labelers that are no longer enabled.
+// It starts new subscriptions for enabled labelers not yet active, restarts
+// subscriptions whose endpoint or sig policy changed in the registry, and
+// cancels subscriptions for labelers that are no longer enabled.
 // Reconcile is idempotent: calling twice with no registry change is a no-op.
 func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 	// Fetch enabled labelers from registry.
@@ -83,6 +85,23 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 	enabledSet := make(map[string]struct{})
 	for _, labeler := range enabled {
 		enabledSet[labeler.DID] = struct{}{}
+	}
+
+	// Restart subscriptions whose registry config changed (e.g. the labeler
+	// moved hosts): cancel the stale subscription so the loop below starts a
+	// fresh one against the current endpoint and sig policy.
+	for _, labeler := range enabled {
+		sc, exists := s.active[labeler.DID]
+		if !exists || !SubscriptionConfigChanged(sc.sub.labeler, labeler) {
+			continue
+		}
+		sc.cancel()
+		sc.sub.limiter.Close()
+		delete(s.active, labeler.DID)
+		s.log.Info("restarting subscription for config change",
+			"labeler", labeler.DID,
+			"old_endpoint", sc.sub.labeler.Endpoint,
+			"new_endpoint", labeler.Endpoint)
 	}
 
 	// Start subscriptions for newly enabled labelers.
@@ -117,7 +136,9 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 			s.active[labeler.DID] = sc
 
 			// Run the subscription in a background goroutine.
+			s.wg.Add(1)
 			go func(sc *subscriptionContext) {
+				defer s.wg.Done()
 				err := sc.sub.run(subCtx)
 				if err != nil && err != context.Canceled {
 					s.log.Error("subscription failed", "labeler", sc.sub.labeler.DID, "err", err)
@@ -210,15 +231,19 @@ func (s *LabelSlurper) Run(ctx context.Context) error {
 	}
 }
 
-// Shutdown stops the slurper and cancels all active subscriptions.
+// Shutdown stops the slurper, cancels all active subscriptions, and blocks
+// until their goroutines have exited, so callers can safely close shared
+// resources (e.g. the store) afterwards.
 func (s *LabelSlurper) Shutdown() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for did, sc := range s.active {
 		sc.cancel()
+		sc.sub.limiter.Close()
 		s.log.Info("cancelled subscription", "labeler", did)
 	}
 	s.active = make(map[string]*subscriptionContext)
 	s.cancel()
+	s.mu.Unlock()
+
+	s.wg.Wait()
 }

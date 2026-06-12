@@ -9,7 +9,7 @@ Provides authenticated HTTP endpoints for manual labeler registry management. Al
 - **Exposes**: `API` (Routes), `RequireBearer` middleware
 - **Guarantees**:
   - All routes require Bearer token auth (constant-time comparison)
-  - POST /admin/labelers resolves endpoint from DID before upserting with source="manual"
+  - POST /admin/labelers resolves endpoint from DID before upserting with source="manual"; the manual upsert claims source/enabled even if the row was previously inserted disabled by discovery, and the 201 body echoes the persisted row
   - Enable/disable/delete trigger slurper reconcile via poke callback
   - Manual labelers stick: source="manual" is preserved by the store's upsert stickiness rule
 - **Expects**: Valid admin token configured. DIDResolver can reach the network.
@@ -27,6 +27,7 @@ Provides authenticated HTTP endpoints for manual labeler registry management. Al
 | DELETE | /admin/labelers/{did} | Disable labeler |
 | POST | /admin/labelers/{did}/enable | Enable labeler |
 | POST | /admin/labelers/{did}/disable | Disable labeler |
+| PATCH | /admin/labelers/{did} | Set/clear require_sig override (`{"require_sig": true\|false\|null}`); poke restarts the subscription |
 
 ## Key Files
 - `admin.go` - API struct, Routes, all handlers

@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/rand"
 	"net/url"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/bluesky-social/indigo/cmd/relay/stream"
 	"github.com/bluesky-social/indigo/cmd/relay/stream/schedulers/sequential"
 	"github.com/gorilla/websocket"
+	"github.com/scarndp/labeler-relay/internal/backoff"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
@@ -26,13 +26,14 @@ const (
 // FirehoseWatcher consumes com.atproto.sync.subscribeRepos, discovers labelers,
 // and emits #service events into the output stream.
 type FirehoseWatcher struct {
-	url      string
-	registry *store.LabelerRegistry
-	persist  *store.LabelPersist
-	resolver DIDResolver
-	store    *store.Store // for meta cursor
-	poke     func()        // notify slurper to reconcile
-	log      *slog.Logger
+	url           string
+	registry      *store.LabelerRegistry
+	persist       *store.LabelPersist
+	resolver      DIDResolver
+	store         *store.Store // for meta cursor
+	poke          func()       // notify slurper to reconcile
+	autoSubscribe bool         // whether discovered labelers are enabled on upsert
+	log           *slog.Logger
 
 	// cursor batching thresholds (overridable for tests; zero values use defaults)
 	cursorFlushEvery    int
@@ -60,24 +61,25 @@ func NewFirehoseWatcher(
 	resolver DIDResolver,
 	store *store.Store,
 	poke func(),
+	autoSubscribe bool,
 	log *slog.Logger,
 ) *FirehoseWatcher {
 	return &FirehoseWatcher{
-		url:      url,
-		registry: registry,
-		persist:  persist,
-		resolver: resolver,
-		store:    store,
-		poke:     poke,
-		log:      log,
+		url:           url,
+		registry:      registry,
+		persist:       persist,
+		resolver:      resolver,
+		store:         store,
+		poke:          poke,
+		autoSubscribe: autoSubscribe,
+		log:           log,
 	}
 }
 
 // Run starts the redial loop, consuming firehose commits.
 // Blocks until ctx is cancelled.
 func (w *FirehoseWatcher) Run(ctx context.Context) error {
-	backoffMs := 100
-	const maxBackoffMs = 30000
+	backoffMs := 0
 
 	for {
 		select {
@@ -86,7 +88,9 @@ func (w *FirehoseWatcher) Run(ctx context.Context) error {
 		default:
 		}
 
+		dialStart := time.Now()
 		err := w.dial(ctx)
+		connectedFor := time.Since(dialStart)
 		if err == context.Canceled || err == context.DeadlineExceeded {
 			return err
 		}
@@ -95,20 +99,21 @@ func (w *FirehoseWatcher) Run(ctx context.Context) error {
 			w.log.Error("firehose dial failed", "err", err)
 		}
 
-		// Exponential backoff with jitter.
+		// Exponential backoff with jitter. A connection that survived past
+		// the reset threshold restarts the sequence from the initial delay.
+		backoffMs = backoff.NextMs(backoffMs, connectedFor)
 		maxJitter := int(float64(backoffMs) * 0.1)
 		if maxJitter < 1 {
 			maxJitter = 1
 		}
 		jitter := rand.Intn(maxJitter)
 		sleepMs := backoffMs + jitter
-		if sleepMs > maxBackoffMs {
-			sleepMs = maxBackoffMs
+		if sleepMs > backoff.MaxMs {
+			sleepMs = backoff.MaxMs
 		}
 
 		select {
 		case <-time.After(time.Duration(sleepMs) * time.Millisecond):
-			backoffMs = int(math.Min(float64(backoffMs)*2, float64(maxBackoffMs)))
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -213,11 +218,14 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 
 			// Upsert the labeler with firehose source.
 			// The Phase-2 upsert rule preserves manual labeler entries.
+			// Enabled only matters on first insert: the ON CONFLICT rule
+			// preserves the existing enabled state, so flipping the flag
+			// never disables an already-registered labeler.
 			err = w.registry.Upsert(ctx, store.Labeler{
 				DID:       op.RepoDID,
 				Endpoint:  endpoint,
 				Source:    "firehose",
-				Enabled:   true,
+				Enabled:   w.autoSubscribe,
 				UpdatedAt: time.Now().Unix(),
 			})
 			if err != nil {

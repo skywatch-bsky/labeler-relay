@@ -67,6 +67,7 @@ func (l *Limiter) Close() {
 // or the context is cancelled. This blocks only the calling goroutine,
 // never a shared resource.
 func (l *Limiter) Wait(ctx context.Context) error {
+	throttled := false
 	for {
 		// Allow() is destructive: it consumes a token from the window even if the
 		// other window later rejects. When perSecond allows but perHour rejects, the
@@ -84,8 +85,13 @@ func (l *Limiter) Wait(ctx context.Context) error {
 		}
 
 		// Notify observer that throttling occurred (AC7.1 observability).
-		if l.onThrottled != nil {
-			l.onThrottled()
+		// Fire once per blocked Wait, not once per poll iteration: the
+		// counter measures throttle events, not 10ms loop spins.
+		if !throttled {
+			throttled = true
+			if l.onThrottled != nil {
+				l.onThrottled()
+			}
 		}
 
 		// Short backoff before retry

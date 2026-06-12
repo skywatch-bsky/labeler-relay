@@ -44,15 +44,34 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 		lastError = labeler.LastError
 	}
 
-	// Stickiness rule: on conflict, only update endpoint and updated_at.
-	// Leave source and enabled untouched to preserve manual labeler stickiness.
+	// Stickiness rule: firehose upserts only refresh endpoint and updated_at,
+	// preserving operator-controlled source and enabled. Manual upserts claim
+	// the row: they additionally take over source and enabled so an operator
+	// add always yields the requested state, even when the row was previously
+	// inserted disabled by discovery (e.g. via RecordError). Cursor and sig
+	// policy are preserved in both cases. A successful upsert clears
+	// last_error: the row resolved cleanly, so any prior discovery error is
+	// stale.
 	query := `
 		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(did) DO UPDATE SET
 			endpoint = excluded.endpoint,
+			last_error = NULL,
 			updated_at = excluded.updated_at
 	`
+	if labeler.Source == "manual" {
+		query = `
+		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(did) DO UPDATE SET
+			endpoint = excluded.endpoint,
+			source = excluded.source,
+			enabled = excluded.enabled,
+			last_error = NULL,
+			updated_at = excluded.updated_at
+	`
+	}
 
 	enabled := 0
 	if labeler.Enabled {
@@ -85,6 +104,31 @@ func (r *LabelerRegistry) SetEnabled(ctx context.Context, did string, enabled bo
 	result, err := r.store.DB().ExecContext(ctx, "UPDATE labelers SET enabled = ? WHERE did = ?", enabledInt, did)
 	if err != nil {
 		return fmt.Errorf("failed to set enabled: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+
+	if affected == 0 {
+		return fmt.Errorf("labeler not found: %s", did)
+	}
+
+	return nil
+}
+
+// SetRequireSig sets or clears the per-labeler signature-policy override.
+// A nil value clears the override so the global default applies.
+func (r *LabelerRegistry) SetRequireSig(ctx context.Context, did string, requireSig *bool) error {
+	var val interface{}
+	if requireSig != nil {
+		val = *requireSig
+	}
+
+	result, err := r.store.DB().ExecContext(ctx, "UPDATE labelers SET require_sig = ? WHERE did = ?", val, did)
+	if err != nil {
+		return fmt.Errorf("failed to set require_sig: %w", err)
 	}
 
 	affected, err := result.RowsAffected()

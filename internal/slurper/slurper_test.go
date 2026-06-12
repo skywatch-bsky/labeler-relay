@@ -650,6 +650,173 @@ func TestSlurperReconcileIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestSlurperReconcileRestartsOnEndpointChange verifies that updating a
+// labeler's endpoint in the registry followed by a Reconcile causes the
+// subscription to redial the new endpoint without a process restart.
+func TestSlurperReconcileRestartsOnEndpointChange(t *testing.T) {
+	t.Parallel()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	fakeServerOld := newFakeLabelerServer(t)
+	fakeServerNew := newFakeLabelerServer(t)
+	defer fakeServerOld.Close()
+	defer fakeServerNew.Close()
+
+	labeler := store.Labeler{
+		DID:      "did:plc:endpoint-move",
+		Endpoint: fakeServerOld.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "firehose",
+		Enabled:  true,
+	}
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to insert labeler: %v", err)
+	}
+
+	slurper := New(
+		registry,
+		persist,
+		false,
+		LimitConfig{PerSec: 1000, PerHour: 100000},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	defer slurper.Shutdown()
+
+	if err := slurper.Reconcile(context.Background()); err != nil {
+		t.Fatalf("initial Reconcile failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	select {
+	case <-fakeServerOld.wsReady:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for connection to old endpoint")
+	}
+
+	// The labeler moves hosts: a firehose-sourced upsert refreshes the endpoint.
+	labeler.Endpoint = fakeServerNew.server.URL + "/xrpc/com.atproto.label.subscribeLabels"
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to upsert new endpoint: %v", err)
+	}
+
+	if err := slurper.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile after endpoint change failed: %v", err)
+	}
+
+	select {
+	case <-fakeServerNew.wsReady:
+	case <-ctx.Done():
+		t.Fatalf("timeout: subscription did not redial the new endpoint after Reconcile")
+	}
+
+	// Labels from the new endpoint must flow through.
+	frame := &atproto.LabelSubscribeLabels_Labels{
+		Labels: []*atproto.LabelDefs_Label{
+			{
+				Src: labeler.DID,
+				Uri: "at://did:plc:user1/app.bsky.feed.post/moved",
+				Val: "moved",
+				Cts: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+		Seq: 1,
+	}
+	if err := fakeServerNew.sendFrame(frame); err != nil {
+		t.Fatalf("failed to send frame from new endpoint: %v", err)
+	}
+
+	if _, err := waitForCondition(ctx, func() (int64, error) {
+		return persist.Head(context.Background())
+	}, 1); err != nil {
+		t.Fatalf("timeout waiting for label from new endpoint: %v", err)
+	}
+}
+
+// TestSlurperReconcileRestartsOnRequireSigChange verifies that a require_sig
+// change in the registry causes Reconcile to replace the subscription so the
+// new sig policy takes effect.
+func TestSlurperReconcileRestartsOnRequireSigChange(t *testing.T) {
+	t.Parallel()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg); err != nil {
+		t.Fatalf("failed to register metrics: %v", err)
+	}
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	fakeServer := newFakeLabelerServer(t)
+	defer fakeServer.Close()
+
+	labeler := store.Labeler{
+		DID:      "did:plc:sig-change",
+		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Source:   "test",
+		Enabled:  true,
+	}
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to insert labeler: %v", err)
+	}
+
+	slurper := New(
+		registry,
+		persist,
+		false,
+		LimitConfig{PerSec: 1000, PerHour: 100000},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	defer slurper.Shutdown()
+
+	if err := slurper.Reconcile(context.Background()); err != nil {
+		t.Fatalf("initial Reconcile failed: %v", err)
+	}
+
+	slurper.mu.Lock()
+	sub1 := slurper.active[labeler.DID]
+	slurper.mu.Unlock()
+
+	if _, err := testStore.DB().ExecContext(context.Background(),
+		`UPDATE labelers SET require_sig = 1 WHERE did = ?`, labeler.DID); err != nil {
+		t.Fatalf("failed to update require_sig: %v", err)
+	}
+
+	if err := slurper.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile after require_sig change failed: %v", err)
+	}
+
+	slurper.mu.Lock()
+	sub2 := slurper.active[labeler.DID]
+	slurper.mu.Unlock()
+
+	if sub1 == sub2 {
+		t.Fatalf("subscription was not replaced after require_sig change")
+	}
+	if sub2.sub.labeler.RequireSig == nil || !*sub2.sub.labeler.RequireSig {
+		t.Errorf("replacement subscription does not carry the updated require_sig")
+	}
+}
+
 // TestSlurperReconcileIsolatesRateLimitingPerLabeler verifies AC7.2 through
 // the real Reconcile wiring: flooding one labeler does not starve another.
 // Unlike TestSlurperIsolatesRateLimitingPerLabeler (which builds subscriptions

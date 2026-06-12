@@ -422,6 +422,7 @@ func runRelay(ctx context.Context, addr, dbPath, adminToken string) error {
 		resolver,
 		st,
 		poke,
+		true,
 		log,
 	)
 

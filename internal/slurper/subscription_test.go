@@ -587,6 +587,82 @@ verified:
 	}
 }
 
+// TestSubscriptionAdvancesCursorWhenAllLabelsDropped verifies that a frame
+// whose labels are all dropped by the sig policy still advances
+// last_upstream_seq, so redials resume from the latest seen seq instead of
+// replaying the entire upstream backlog forever.
+func TestSubscriptionAdvancesCursorWhenAllLabelsDropped(t *testing.T) {
+	t.Parallel()
+
+	testStore, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open test store: %v", err)
+	}
+	defer testStore.Close()
+
+	registry := store.NewLabelerRegistry(testStore)
+	persist := store.NewLabelPersist(testStore)
+
+	labeler := store.Labeler{
+		DID:        "did:plc:cursor-stall-test",
+		Endpoint:   "http://unused.invalid/xrpc/com.atproto.label.subscribeLabels",
+		Source:     "test",
+		Enabled:    true,
+		RequireSig: nil,
+	}
+	if err := registry.Upsert(context.Background(), labeler); err != nil {
+		t.Fatalf("failed to insert labeler: %v", err)
+	}
+
+	// Global default requires signatures, so unsigned labels are dropped.
+	sub := &subscription{
+		labeler:    labeler,
+		persist:    persist,
+		registry:   registry,
+		limiter:    NewLimiter(1000, 100000),
+		sigDefault: true,
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	frame := &atproto.LabelSubscribeLabels_Labels{
+		Labels: []*atproto.LabelDefs_Label{
+			{
+				Src: labeler.DID,
+				Uri: "at://did:plc:user/app.bsky.feed.post/abc",
+				Val: "test",
+				Cts: time.Now().UTC().Format(time.RFC3339),
+				Sig: nil,
+			},
+		},
+		Seq: 100,
+	}
+
+	if err := sub.handleLabelLabels(context.Background(), frame); err != nil {
+		t.Fatalf("handleLabelLabels failed: %v", err)
+	}
+
+	cursor, err := registry.ReadCursor(context.Background(), labeler.DID)
+	if err != nil {
+		t.Fatalf("failed to read cursor: %v", err)
+	}
+	if cursor == nil || *cursor != 100 {
+		got := "nil"
+		if cursor != nil {
+			got = fmt.Sprintf("%d", *cursor)
+		}
+		t.Errorf("expected cursor to advance to 100 after all-dropped frame, got %s", got)
+	}
+
+	// Nothing was persisted: head must not advance.
+	head, err := persist.Head(context.Background())
+	if err != nil {
+		t.Fatalf("failed to read head: %v", err)
+	}
+	if head != 0 {
+		t.Errorf("expected head=0 (all labels dropped), got %d", head)
+	}
+}
+
 // TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride verifies AC4.3:
 // with per-labeler require_sig=false override, an unsigned label IS persisted.
 func TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride(t *testing.T) {
