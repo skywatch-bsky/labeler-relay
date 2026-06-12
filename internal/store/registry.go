@@ -44,8 +44,12 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 		lastError = labeler.LastError
 	}
 
-	// Stickiness rule: on conflict, only update endpoint and updated_at.
-	// Leave source and enabled untouched to preserve manual labeler stickiness.
+	// Stickiness rule: firehose upserts only refresh endpoint and updated_at,
+	// preserving operator-controlled source and enabled. Manual upserts claim
+	// the row: they additionally take over source and enabled so an operator
+	// add always yields the requested state, even when the row was previously
+	// inserted disabled by discovery (e.g. via RecordError). Cursor, sig
+	// policy, and last_error are preserved in both cases.
 	query := `
 		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -53,6 +57,17 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 			endpoint = excluded.endpoint,
 			updated_at = excluded.updated_at
 	`
+	if labeler.Source == "manual" {
+		query = `
+		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(did) DO UPDATE SET
+			endpoint = excluded.endpoint,
+			source = excluded.source,
+			enabled = excluded.enabled,
+			updated_at = excluded.updated_at
+	`
+	}
 
 	enabled := 0
 	if labeler.Enabled {
