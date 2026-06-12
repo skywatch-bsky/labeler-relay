@@ -48,6 +48,9 @@ func (a *API) Routes() http.Handler {
 	// POST /admin/labelers/{did}/disable — disable a labeler
 	mux.Handle("POST /admin/labelers/{did}/disable", RequireBearer(a.token, http.HandlerFunc(a.handleDisableLabeler)))
 
+	// PATCH /admin/labelers/{did} — update per-labeler settings (require_sig)
+	mux.Handle("PATCH /admin/labelers/{did}", RequireBearer(a.token, http.HandlerFunc(a.handlePatchLabeler)))
+
 	return mux
 }
 
@@ -111,6 +114,61 @@ func (a *API) handlePostLabeler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(persisted)
+}
+
+// handlePatchLabeler updates per-labeler settings. The only supported field is
+// require_sig: true/false sets the override, an explicit null clears it back
+// to the global default. The field must be present -- an empty body is a 400,
+// not a silent clear.
+func (a *API) handlePatchLabeler(w http.ResponseWriter, r *http.Request) {
+	did := r.PathValue("did")
+
+	var fields map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	rawSig, ok := fields["require_sig"]
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "require_sig required (true, false, or null)"})
+		return
+	}
+
+	var requireSig *bool
+	if err := json.Unmarshal(rawSig, &requireSig); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "require_sig must be true, false, or null"})
+		return
+	}
+
+	if err := a.registry.SetRequireSig(r.Context(), did, requireSig); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "labeler not found"})
+		return
+	}
+
+	// Notify slurper to reconcile: a sig-policy change restarts the subscription.
+	a.poke()
+
+	// Echo the persisted row so the response reflects actual registry state.
+	persisted, found, err := a.registry.Get(r.Context(), did)
+	if err != nil || !found {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to read back labeler"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(persisted)
 }
 

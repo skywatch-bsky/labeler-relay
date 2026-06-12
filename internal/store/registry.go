@@ -118,6 +118,31 @@ func (r *LabelerRegistry) SetEnabled(ctx context.Context, did string, enabled bo
 	return nil
 }
 
+// SetRequireSig sets or clears the per-labeler signature-policy override.
+// A nil value clears the override so the global default applies.
+func (r *LabelerRegistry) SetRequireSig(ctx context.Context, did string, requireSig *bool) error {
+	var val interface{}
+	if requireSig != nil {
+		val = *requireSig
+	}
+
+	result, err := r.store.DB().ExecContext(ctx, "UPDATE labelers SET require_sig = ? WHERE did = ?", val, did)
+	if err != nil {
+		return fmt.Errorf("failed to set require_sig: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+
+	if affected == 0 {
+		return fmt.Errorf("labeler not found: %s", did)
+	}
+
+	return nil
+}
+
 func (r *LabelerRegistry) Get(ctx context.Context, did string) (Labeler, bool, error) {
 	var labeler Labeler
 	var enabled int

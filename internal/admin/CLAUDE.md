@@ -27,6 +27,7 @@ Provides authenticated HTTP endpoints for manual labeler registry management. Al
 | DELETE | /admin/labelers/{did} | Disable labeler |
 | POST | /admin/labelers/{did}/enable | Enable labeler |
 | POST | /admin/labelers/{did}/disable | Disable labeler |
+| PATCH | /admin/labelers/{did} | Set/clear require_sig override (`{"require_sig": true\|false\|null}`); poke restarts the subscription |
 
 ## Key Files
 - `admin.go` - API struct, Routes, all handlers

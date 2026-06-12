@@ -392,4 +392,81 @@ func TestAdminAPI(t *testing.T) {
 
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
+
+	t.Run("PATCH /admin/labelers/{did} sets, clears, and validates require_sig", func(t *testing.T) {
+		_, api, token := setupTestEnv(t)
+		ctx := context.Background()
+
+		require.NoError(t, api.registry.Upsert(ctx, store.Labeler{
+			DID:       "did:plc:labeler1",
+			Endpoint:  "https://labeler1.example.com/labels",
+			Source:    "manual",
+			Enabled:   true,
+			UpdatedAt: time.Now().Unix(),
+		}))
+
+		handler := api.Routes()
+
+		patch := func(body string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("PATCH", "/admin/labelers/did:plc:labeler1", bytes.NewBufferString(body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rec, req)
+			return rec
+		}
+
+		// Set the override and verify the echoed row carries it.
+		rec := patch(`{"require_sig": true}`)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var echoed store.Labeler
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&echoed))
+		require.NotNil(t, echoed.RequireSig)
+		assert.True(t, *echoed.RequireSig)
+
+		persisted, found, err := api.registry.Get(ctx, "did:plc:labeler1")
+		require.NoError(t, err)
+		require.True(t, found)
+		require.NotNil(t, persisted.RequireSig)
+		assert.True(t, *persisted.RequireSig)
+
+		// Clear the override with an explicit null.
+		rec = patch(`{"require_sig": null}`)
+		require.Equal(t, http.StatusOK, rec.Code)
+		persisted, _, err = api.registry.Get(ctx, "did:plc:labeler1")
+		require.NoError(t, err)
+		assert.Nil(t, persisted.RequireSig)
+
+		// Missing field is a 400, not a silent clear.
+		rec = patch(`{}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+		// Malformed value is a 400.
+		rec = patch(`{"require_sig": "yes"}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("PATCH /admin/labelers/{did} returns 404 for unknown labeler", func(t *testing.T) {
+		_, api, token := setupTestEnv(t)
+
+		handler := api.Routes()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("PATCH", "/admin/labelers/did:plc:missing", bytes.NewBufferString(`{"require_sig": true}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("PATCH /admin/labelers/{did} requires auth", func(t *testing.T) {
+		_, api, _ := setupTestEnv(t)
+
+		handler := api.Routes()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("PATCH", "/admin/labelers/did:plc:labeler1", bytes.NewBufferString(`{"require_sig": true}`))
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
 }
