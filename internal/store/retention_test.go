@@ -113,6 +113,128 @@ func TestPruneBothKinds(t *testing.T) {
 	require.Equal(t, int64(3), newFloor)
 }
 
+// TestPruneBatchedDeletesAll verifies that Prune removes every row older than
+// the cutoff even when the count exceeds the batch size, exercising the
+// multi-batch loop.
+func TestPruneBatchedDeletesAll(t *testing.T) {
+	store, cleanup := testStore(t)
+	defer cleanup()
+
+	persist := NewLabelPersist(store)
+	persist.pruneBatchSize = 2
+	ctx := context.Background()
+
+	// 5 old rows (ts 1001..1005), 2 recent rows (ts 9001..9002)
+	for i := 1; i <= 5; i++ {
+		_, err := store.DB().ExecContext(ctx,
+			`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts)
+			 VALUES (?, ?, ?, x'00', ?)`,
+			"labels", "did:plc:labeler", nil, 1000+i,
+		)
+		require.NoError(t, err)
+	}
+	for i := 1; i <= 2; i++ {
+		_, err := store.DB().ExecContext(ctx,
+			`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts)
+			 VALUES (?, ?, ?, x'00', ?)`,
+			"labels", "did:plc:labeler", nil, 9000+i,
+		)
+		require.NoError(t, err)
+	}
+
+	// Batch size 2 over 5 old rows: three delete batches (2+2+1)
+	deleted, newFloor, err := persist.Prune(ctx, 5000)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), deleted)
+	require.Equal(t, int64(6), newFloor)
+
+	var seqs []int64
+	err = persist.PlaybackFrames(ctx, 0, func(le LiveEvent) error {
+		seqs = append(seqs, le.RelaySeq)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []int64{6, 7}, seqs)
+}
+
+// TestPruneReturnsOnCancelledContext verifies that Prune aborts between
+// batches when the context is cancelled, so shutdown is not held hostage
+// by a long prune.
+func TestPruneReturnsOnCancelledContext(t *testing.T) {
+	store, cleanup := testStore(t)
+	defer cleanup()
+
+	persist := NewLabelPersist(store)
+	ctx := context.Background()
+
+	_, err := store.DB().ExecContext(ctx,
+		`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts)
+		 VALUES (?, ?, ?, x'00', ?)`,
+		"labels", "did:plc:labeler", nil, 1000,
+	)
+	require.NoError(t, err)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err = persist.Prune(cancelled, 5000)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestPruneDoesNotBlockIngest is a smoke test for the interleaving guarantee:
+// a multi-batch prune runs concurrently with PersistIngest and neither
+// operation may error or deadlock. The hard bound on write-lock hold time
+// comes from the batch size; this test verifies the two paths interleave
+// safely at all.
+func TestPruneDoesNotBlockIngest(t *testing.T) {
+	store, cleanup := testStore(t)
+	defer cleanup()
+
+	persist := NewLabelPersist(store)
+	persist.pruneBatchSize = 50
+	ctx := context.Background()
+
+	// Seed enough old rows for many batches, inside one transaction for speed.
+	tx, err := store.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	for i := 0; i < 2000; i++ {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts)
+			 VALUES (?, ?, ?, x'00', ?)`,
+			"labels", "did:plc:labeler", nil, 1000,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	pruneDone := make(chan error, 1)
+	go func() {
+		_, _, err := persist.Prune(ctx, 5000)
+		pruneDone <- err
+	}()
+
+	cidStr := "bafy1"
+	for i := 0; i < 25; i++ {
+		_, err := persist.PersistIngest(ctx, IngestEvent{
+			Kind:       "labels",
+			LabelerDID: "did:plc:labeler",
+			Labels: []*comatproto.LabelDefs_Label{
+				{
+					Src: "did:plc:labeler",
+					Uri: "at://did:plc:user/app.bsky.feed.post/1",
+					Cid: &cidStr,
+					Val: "label",
+					Cts: "2026-06-01T00:00:00Z",
+					Sig: []byte{byte(i)},
+				},
+			},
+		})
+		require.NoError(t, err, "ingest must not error while prune is running")
+	}
+
+	require.NoError(t, <-pruneDone)
+}
+
 // TestSeqNeverRewindsAfterPrune verifies AC3.3: seq never reuses after prune.
 func TestSeqNeverRewindsAfterPrune(t *testing.T) {
 	store, cleanup := testStore(t)
