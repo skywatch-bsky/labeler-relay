@@ -159,6 +159,12 @@ func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.Label
 	}
 
 	if len(kept) == 0 {
+		// Nothing to persist, but the frame was fully consumed: advance the
+		// cursor so redials resume from here instead of replaying the backlog.
+		// Safe without a persist -- there is nothing to lose on crash.
+		if err := s.registry.WriteCursor(ctx, s.labeler.DID, evt.Seq); err != nil {
+			return fmt.Errorf("failed to flush cursor: %w", err)
+		}
 		return nil
 	}
 
