@@ -39,6 +39,7 @@ type LabelSlurper struct {
 	pokeCh chan struct{} // capacity-1 signal; multiple Poke() calls collapse into one Reconcile
 	mu     sync.Mutex
 	active map[string]*subscriptionContext // keyed by labeler DID
+	wg     sync.WaitGroup                  // tracks subscription goroutines for Shutdown join
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -135,7 +136,9 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 			s.active[labeler.DID] = sc
 
 			// Run the subscription in a background goroutine.
+			s.wg.Add(1)
 			go func(sc *subscriptionContext) {
+				defer s.wg.Done()
 				err := sc.sub.run(subCtx)
 				if err != nil && err != context.Canceled {
 					s.log.Error("subscription failed", "labeler", sc.sub.labeler.DID, "err", err)
@@ -228,11 +231,11 @@ func (s *LabelSlurper) Run(ctx context.Context) error {
 	}
 }
 
-// Shutdown stops the slurper and cancels all active subscriptions.
+// Shutdown stops the slurper, cancels all active subscriptions, and blocks
+// until their goroutines have exited, so callers can safely close shared
+// resources (e.g. the store) afterwards.
 func (s *LabelSlurper) Shutdown() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for did, sc := range s.active {
 		sc.cancel()
 		sc.sub.limiter.Close()
@@ -240,4 +243,7 @@ func (s *LabelSlurper) Shutdown() {
 	}
 	s.active = make(map[string]*subscriptionContext)
 	s.cancel()
+	s.mu.Unlock()
+
+	s.wg.Wait()
 }
