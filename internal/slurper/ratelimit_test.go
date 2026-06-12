@@ -31,6 +31,34 @@ func waitFor(condition func() interface{}, timeout time.Duration) (interface{}, 
 	}
 }
 
+// TestRateLimitThrottledCallbackFiresOncePerBlockedWait verifies that a
+// single Wait call that blocks -- however long -- fires the throttled
+// callback exactly once, not once per poll iteration.
+func TestRateLimitThrottledCallbackFiresOncePerBlockedWait(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewLimiter(1, 3600)
+	defer limiter.Close()
+
+	var throttled int32
+	limiter.SetThrottledCallback(func() {
+		atomic.AddInt32(&throttled, 1)
+	})
+
+	ctx := context.Background()
+
+	// First Wait consumes the only per-second token without blocking.
+	require.NoError(t, limiter.Wait(ctx))
+	require.EqualValues(t, 0, atomic.LoadInt32(&throttled),
+		"unblocked Wait must not fire the throttled callback")
+
+	// Second Wait blocks until the window frees (~1s, dozens of poll
+	// iterations) and must count as ONE throttle event.
+	require.NoError(t, limiter.Wait(ctx))
+	require.EqualValues(t, 1, atomic.LoadInt32(&throttled),
+		"a blocked Wait must fire the throttled callback exactly once")
+}
+
 // TestRateLimitAC7_1 tests that a single limiter throttles correctly.
 // With perSec=5, the first 5 Wait calls should succeed quickly,
 // and the rest should be paced according to the rate limit.
