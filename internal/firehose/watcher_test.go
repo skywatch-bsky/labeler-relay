@@ -19,8 +19,12 @@ import (
 )
 
 // newWatcherForTest wires a FirehoseWatcher over a real temp-file store with a
-// fake resolver and a poke counter.
+// fake resolver and a poke counter. Discovery auto-subscribes.
 func newWatcherForTest(t *testing.T, resolver DIDResolver) (*FirehoseWatcher, *store.Store, *int32) {
+	return newWatcherForTestAutoSubscribe(t, resolver, true)
+}
+
+func newWatcherForTestAutoSubscribe(t *testing.T, resolver DIDResolver, autoSubscribe bool) (*FirehoseWatcher, *store.Store, *int32) {
 	t.Helper()
 	s, err := store.Open(t.TempDir() + "/test.db")
 	if err != nil {
@@ -36,9 +40,39 @@ func newWatcherForTest(t *testing.T, resolver DIDResolver) (*FirehoseWatcher, *s
 		resolver,
 		s,
 		func() { atomic.AddInt32(&pokeCount, 1) },
+		autoSubscribe,
 		slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), nil)),
 	)
 	return w, s, &pokeCount
+}
+
+// TestWatcherDiscoveryRespectsAutoSubscribeFalse verifies that with
+// auto-subscribe disabled, a discovered labeler is registered but NOT
+// enabled -- discovery becomes opt-in.
+func TestWatcherDiscoveryRespectsAutoSubscribeFalse(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:optin-discover"
+	const endpoint = "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels"
+
+	w, _, _ := newWatcherForTestAutoSubscribe(t,
+		&fakeDIDResolver{endpoints: map[string]string{did: endpoint}}, false)
+	ctx := context.Background()
+
+	if err := w.handleCommit(ctx, serviceCommit(t, did, "create", 1, sampleService("2026-06-02T00:00:00Z"))); err != nil {
+		t.Fatalf("handleCommit(create): %v", err)
+	}
+
+	lab, found, err := w.registry.Get(ctx, did)
+	if err != nil || !found {
+		t.Fatalf("labeler should still be registered on discovery: found=%v err=%v", found, err)
+	}
+	if lab.Enabled {
+		t.Error("discovered labeler should NOT be enabled when auto-subscribe is off")
+	}
+	if lab.Endpoint != endpoint {
+		t.Errorf("endpoint = %q, want %q", lab.Endpoint, endpoint)
+	}
 }
 
 // serviceCommit builds a SyncSubscribeRepos_Commit carrying a REAL CAR with one

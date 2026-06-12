@@ -26,13 +26,14 @@ const (
 // FirehoseWatcher consumes com.atproto.sync.subscribeRepos, discovers labelers,
 // and emits #service events into the output stream.
 type FirehoseWatcher struct {
-	url      string
-	registry *store.LabelerRegistry
-	persist  *store.LabelPersist
-	resolver DIDResolver
-	store    *store.Store // for meta cursor
-	poke     func()        // notify slurper to reconcile
-	log      *slog.Logger
+	url           string
+	registry      *store.LabelerRegistry
+	persist       *store.LabelPersist
+	resolver      DIDResolver
+	store         *store.Store // for meta cursor
+	poke          func()       // notify slurper to reconcile
+	autoSubscribe bool         // whether discovered labelers are enabled on upsert
+	log           *slog.Logger
 
 	// cursor batching thresholds (overridable for tests; zero values use defaults)
 	cursorFlushEvery    int
@@ -60,16 +61,18 @@ func NewFirehoseWatcher(
 	resolver DIDResolver,
 	store *store.Store,
 	poke func(),
+	autoSubscribe bool,
 	log *slog.Logger,
 ) *FirehoseWatcher {
 	return &FirehoseWatcher{
-		url:      url,
-		registry: registry,
-		persist:  persist,
-		resolver: resolver,
-		store:    store,
-		poke:     poke,
-		log:      log,
+		url:           url,
+		registry:      registry,
+		persist:       persist,
+		resolver:      resolver,
+		store:         store,
+		poke:          poke,
+		autoSubscribe: autoSubscribe,
+		log:           log,
 	}
 }
 
@@ -215,11 +218,14 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 
 			// Upsert the labeler with firehose source.
 			// The Phase-2 upsert rule preserves manual labeler entries.
+			// Enabled only matters on first insert: the ON CONFLICT rule
+			// preserves the existing enabled state, so flipping the flag
+			// never disables an already-registered labeler.
 			err = w.registry.Upsert(ctx, store.Labeler{
 				DID:       op.RepoDID,
 				Endpoint:  endpoint,
 				Source:    "firehose",
-				Enabled:   true,
+				Enabled:   w.autoSubscribe,
 				UpdatedAt: time.Now().Unix(),
 			})
 			if err != nil {
