@@ -288,6 +288,80 @@ func TestRegistry(t *testing.T) {
 		}
 	})
 
+	t.Run("Manual upsert claims a wedged firehose row: enables it and preserves the cursor", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		s, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		defer s.Close()
+
+		reg := store.NewLabelerRegistry(s)
+
+		// Simulate the discovery-error wedge: RecordError inserts a minimal
+		// disabled firehose row.
+		did := "did:plc:wedged"
+		if err := reg.RecordError(ctx, did, "no atproto_labeler service endpoint"); err != nil {
+			t.Fatalf("RecordError failed: %v", err)
+		}
+
+		wedged, exists, err := reg.Get(ctx, did)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if !exists {
+			t.Fatal("labeler not found after RecordError")
+		}
+		if wedged.Enabled {
+			t.Fatal("expected RecordError row to be disabled")
+		}
+		if wedged.Source != "firehose" {
+			t.Fatalf("expected RecordError row source=firehose, got %q", wedged.Source)
+		}
+
+		// Give the row a cursor so we can verify the manual upsert preserves it.
+		if err := reg.WriteCursor(ctx, did, 42); err != nil {
+			t.Fatalf("WriteCursor failed: %v", err)
+		}
+
+		// Manual upsert (the admin-add path) must claim the row.
+		manual := store.Labeler{
+			DID:       did,
+			Endpoint:  "https://recovered.example.com/labels",
+			Source:    "manual",
+			Enabled:   true,
+			UpdatedAt: 5000,
+		}
+		if err := reg.Upsert(ctx, manual); err != nil {
+			t.Fatalf("manual Upsert failed: %v", err)
+		}
+
+		retrieved, exists, err := reg.Get(ctx, did)
+		if err != nil {
+			t.Fatalf("Get after manual upsert failed: %v", err)
+		}
+		if !exists {
+			t.Fatal("labeler not found after manual upsert")
+		}
+		if !retrieved.Enabled {
+			t.Error("expected manual upsert to enable the wedged labeler")
+		}
+		if retrieved.Source != "manual" {
+			t.Errorf("expected source=manual after manual upsert, got %q", retrieved.Source)
+		}
+		if retrieved.Endpoint != manual.Endpoint {
+			t.Errorf("expected endpoint %q, got %q", manual.Endpoint, retrieved.Endpoint)
+		}
+
+		seq, err := reg.ReadCursor(ctx, did)
+		if err != nil {
+			t.Fatalf("ReadCursor failed: %v", err)
+		}
+		if seq == nil || *seq != 42 {
+			t.Errorf("expected cursor 42 preserved across manual upsert, got %v", seq)
+		}
+	})
+
 	t.Run("Get returns exists=false for missing labeler", func(t *testing.T) {
 		dbPath := filepath.Join(t.TempDir(), "test.db")
 		s, err := store.Open(dbPath)

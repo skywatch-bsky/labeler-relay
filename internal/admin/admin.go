@@ -100,9 +100,18 @@ func (a *API) handlePostLabeler(w http.ResponseWriter, r *http.Request) {
 	// Notify slurper to reconcile.
 	a.poke()
 
+	// Echo the persisted row so the response reflects actual registry state.
+	persisted, found, err := a.registry.Get(r.Context(), req.DID)
+	if err != nil || !found {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to read back labeler"})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(labeler)
+	json.NewEncoder(w).Encode(persisted)
 }
 
 // handleDeleteLabeler disables a labeler.

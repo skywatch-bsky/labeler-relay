@@ -11,7 +11,7 @@ Single source of truth for event persistence and labeler registration. Owns the 
   - `relay_seq` is strictly monotonic via AUTOINCREMENT; never reused even after prune/restart
   - `PersistIngest` serializes under a mutex: broadcast order == commit order == seq order
   - Broadcaster is called while holding the mutex -- must be non-blocking
-  - Upsert stickiness: ON CONFLICT only updates endpoint and updated_at; source/enabled are preserved
+  - Upsert stickiness: firehose upserts only update endpoint and updated_at (source/enabled preserved); manual upserts additionally claim source and enabled. Cursor, require_sig, and last_error are never touched on conflict.
   - Playback returns events in ascending relay_seq order
 - **Expects**: Single process owns the database (WAL mode, single-writer)
 

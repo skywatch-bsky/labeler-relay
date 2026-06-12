@@ -85,6 +85,42 @@ func TestAdminAPI(t *testing.T) {
 		assert.True(t, labeler.Enabled)
 	})
 
+	t.Run("POST /admin/labelers enables a labeler wedged disabled by RecordError", func(t *testing.T) {
+		_, api, token := setupTestEnv(t)
+		ctx := context.Background()
+
+		// Simulate the discovery-error wedge: a minimal disabled firehose row.
+		err := api.registry.RecordError(ctx, "did:plc:labeler1", "resolve failed")
+		require.NoError(t, err)
+
+		handler := api.Routes()
+		rec := httptest.NewRecorder()
+
+		body := bytes.NewBufferString(`{"did":"did:plc:labeler1"}`)
+		req := httptest.NewRequest("POST", "/admin/labelers", body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+
+		// The persisted row must be enabled with source=manual.
+		labeler, found, err := api.registry.Get(ctx, "did:plc:labeler1")
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.True(t, labeler.Enabled, "manual add must enable a previously wedged labeler")
+		assert.Equal(t, "manual", labeler.Source)
+		assert.Equal(t, "https://labeler1.example.com/labels", labeler.Endpoint)
+
+		// The response body must reflect the persisted row, not the request.
+		var respLabeler store.Labeler
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&respLabeler))
+		assert.Equal(t, labeler.Enabled, respLabeler.Enabled)
+		assert.Equal(t, labeler.Source, respLabeler.Source)
+		assert.Equal(t, labeler.Endpoint, respLabeler.Endpoint)
+	})
+
 	t.Run("AC8.2: DELETE /admin/labelers/{did} disables labeler", func(t *testing.T) {
 		_, api, token := setupTestEnv(t)
 
