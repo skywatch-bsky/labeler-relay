@@ -4,6 +4,7 @@ package slurper
 
 import (
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
+	"github.com/scarndp/labeler-relay/internal/store"
 )
 
 // SigRequired returns whether a labeler must have signed labels, resolving the
@@ -22,4 +23,18 @@ func KeepLabel(label *comatproto.LabelDefs_Label, sigRequired bool) bool {
 		return true
 	}
 	return !sigRequired
+}
+
+// SubscriptionConfigChanged reports whether registry fields consumed by a
+// running subscription differ between the snapshot taken at subscription
+// start and the current registry row. Endpoint feeds the dial loop and
+// RequireSig feeds the sig policy; a change to either requires a restart.
+func SubscriptionConfigChanged(snapshot, current store.Labeler) bool {
+	if snapshot.Endpoint != current.Endpoint {
+		return true
+	}
+	if (snapshot.RequireSig == nil) != (current.RequireSig == nil) {
+		return true
+	}
+	return snapshot.RequireSig != nil && *snapshot.RequireSig != *current.RequireSig
 }
