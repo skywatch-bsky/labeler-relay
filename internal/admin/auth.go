@@ -28,9 +28,10 @@ func RequireBearer(token string, next http.Handler) http.Handler {
 		provided := parts[1]
 
 		// Constant-time comparison: compare as byte slices.
-		// ConstantTimeCompare returns 1 if equal, 0 otherwise.
-		// It does NOT early-return on length mismatch — the lengths are equal,
-		// so we don't leak length. But guard against differing lengths for robustness.
+		// ConstantTimeCompare returns 1 if equal, 0 otherwise. It returns 0
+		// immediately on length mismatch, so token length is observable via
+		// timing -- acceptable, since length alone does not narrow the search
+		// space meaningfully for a high-entropy token.
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)

@@ -380,4 +380,93 @@ func TestRegistry(t *testing.T) {
 			t.Error("expected exists=false for missing labeler")
 		}
 	})
+
+	t.Run("SetRequireSig updates and clears the per-labeler override", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		s, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		defer s.Close()
+
+		reg := store.NewLabelerRegistry(s)
+
+		const did = "did:plc:sig-policy"
+		if err := reg.Upsert(ctx, store.Labeler{
+			DID:       did,
+			Endpoint:  "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels",
+			Source:    "manual",
+			Enabled:   true,
+			UpdatedAt: 1234567890,
+		}); err != nil {
+			t.Fatalf("Upsert failed: %v", err)
+		}
+
+		// Set an explicit override.
+		val := false
+		if err := reg.SetRequireSig(ctx, did, &val); err != nil {
+			t.Fatalf("SetRequireSig failed: %v", err)
+		}
+		got, _, err := reg.Get(ctx, did)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if got.RequireSig == nil || *got.RequireSig != false {
+			t.Errorf("expected require_sig override false, got %v", got.RequireSig)
+		}
+
+		// Clear the override back to the global default.
+		if err := reg.SetRequireSig(ctx, did, nil); err != nil {
+			t.Fatalf("SetRequireSig(nil) failed: %v", err)
+		}
+		got, _, err = reg.Get(ctx, did)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if got.RequireSig != nil {
+			t.Errorf("expected require_sig override cleared, got %v", *got.RequireSig)
+		}
+
+		// Unknown DID errors.
+		if err := reg.SetRequireSig(ctx, "did:plc:missing", &val); err == nil {
+			t.Error("expected error for unknown labeler")
+		}
+	})
+
+	t.Run("Successful upsert clears a previously recorded error", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		s, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		defer s.Close()
+
+		reg := store.NewLabelerRegistry(s)
+
+		const did = "did:plc:errored-then-resolved"
+
+		// Discovery fails first: a minimal disabled row with an error.
+		if err := reg.RecordError(ctx, did, "no atproto_labeler service endpoint"); err != nil {
+			t.Fatalf("RecordError failed: %v", err)
+		}
+
+		// Discovery later succeeds: the upsert must clear the stale error.
+		if err := reg.Upsert(ctx, store.Labeler{
+			DID:       did,
+			Endpoint:  "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels",
+			Source:    "firehose",
+			Enabled:   true,
+			UpdatedAt: 1234567890,
+		}); err != nil {
+			t.Fatalf("Upsert failed: %v", err)
+		}
+
+		got, exists, err := reg.Get(ctx, did)
+		if err != nil || !exists {
+			t.Fatalf("Get failed: exists=%v err=%v", exists, err)
+		}
+		if got.LastError != "" {
+			t.Errorf("expected last_error cleared after successful upsert, got %q", got.LastError)
+		}
+	})
 }

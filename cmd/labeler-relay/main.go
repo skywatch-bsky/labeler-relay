@@ -135,6 +135,11 @@ func run(ctx context.Context) error {
 	httpServer := &http.Server{
 		Addr:    cfg.ListenAddr,
 		Handler: mux,
+		// Slowloris protection for the admin/metrics/health endpoints. The
+		// subscribeLabelers WebSocket is unaffected: hijacked connections are
+		// not subject to server timeouts.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	// Step 9: Build the prune job and wire retention-floor gauge.
@@ -175,6 +180,14 @@ func run(ctx context.Context) error {
 		if err := sl.Run(gctx); err != nil && err != context.Canceled {
 			return fmt.Errorf("slurper: %w", err)
 		}
+		return nil
+	})
+
+	// Subscription goroutines hang off the slurper's own root context, not
+	// gctx, so they must be cancelled explicitly on shutdown.
+	g.Go(func() error {
+		<-gctx.Done()
+		sl.Shutdown()
 		return nil
 	})
 
