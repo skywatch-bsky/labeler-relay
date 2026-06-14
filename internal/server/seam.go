@@ -17,37 +17,59 @@ import (
 // events from the Hub. It returns a channel of LiveEvent and a cleanup func.
 //
 // Algorithm (chunked backfill):
-//  1. Drain the backlog in chunks of bufSize events from the durable store,
-//     sending each directly to the output channel. No live subscription is
-//     active during this phase, so there is no buffer pressure from live events.
-//  2. After each chunk, check how far behind head we are. If the remaining gap
-//     is <= bufSize, we are close enough to attach live safely.
-//  3. For the final seam: subscribe to live BEFORE draining the last chunk,
-//     exactly like the original algorithm. The dedup boundary drops any live
-//     events already sent during this final playback.
+//  1. Subscribe to live BEFORE returning (synchronous) — same as the original.
+//     This guarantees no events are missed after StreamFrom returns.
+//  2. Drain the backlog in chunks of bufSize events from the durable store.
+//     During this phase a background drainer keeps the live channel from
+//     overflowing by discarding buffered events (they'll be read from the DB).
+//  3. Once within bufSize of head, stop the drainer and do the final seam:
+//     drain remaining backfill from the DB, then switch to live with the
+//     dedup boundary dropping any events already sent during backfill.
 //
-// This bounds the live buffer requirement to at most one chunk's worth of live
-// events, regardless of total backfill size.
+// This bounds the live buffer requirement: during bulk backfill the drainer
+// prevents overflow, and during the final seam only one chunk's worth of
+// events can accumulate.
 func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int64, bufSize int) (<-chan store.LiveEvent, func(), error) {
-	out := make(chan store.LiveEvent, bufSize)
+	// Subscribe to live synchronously — captures all events from this moment.
+	live, liveCancel := hub.Subscribe(bufSize)
 
-	innerCtx, innerCancel := context.WithCancel(ctx)
+	out := make(chan store.LiveEvent, bufSize)
 
 	go func() {
 		defer close(out)
+		defer liveCancel()
 
 		cursor := since
 
-		// Phase 1: Chunked backfill — drain in bufSize-sized chunks without a
-		// live subscription. This is the key change: no live buffer pressure
-		// during the bulk of the backfill.
+		// Phase 1: Chunked backfill. A background goroutine drains the live
+		// channel to prevent the Hub from dropping us while we read from the DB.
+		drainDone := make(chan struct{})
+		stopDrain := make(chan struct{})
+		go func() {
+			defer close(drainDone)
+			for {
+				select {
+				case _, ok := <-live:
+					if !ok {
+						return
+					}
+				case <-stopDrain:
+					return
+				}
+			}
+		}()
+
 		for {
-			if innerCtx.Err() != nil {
+			if ctx.Err() != nil {
+				close(stopDrain)
+				<-drainDone
 				return
 			}
 
-			head, err := p.Head(innerCtx)
-			if err != nil || innerCtx.Err() != nil {
+			head, err := p.Head(ctx)
+			if err != nil || ctx.Err() != nil {
+				close(stopDrain)
+				<-drainDone
 				return
 			}
 
@@ -56,16 +78,18 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 				break
 			}
 
-			n, err := p.PlaybackFramesChunk(innerCtx, cursor, bufSize, func(e store.LiveEvent) error {
+			n, err := p.PlaybackFramesChunk(ctx, cursor, bufSize, func(e store.LiveEvent) error {
 				select {
 				case out <- e:
 					cursor = e.RelaySeq
 					return nil
-				case <-innerCtx.Done():
-					return innerCtx.Err()
+				case <-ctx.Done():
+					return ctx.Err()
 				}
 			})
-			if err != nil && innerCtx.Err() == nil {
+			if err != nil && ctx.Err() == nil {
+				close(stopDrain)
+				<-drainDone
 				return
 			}
 			if n == 0 {
@@ -73,28 +97,29 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 			}
 		}
 
-		if innerCtx.Err() != nil {
+		// Stop the drainer before entering Phase 2 so we can read live events.
+		close(stopDrain)
+		<-drainDone
+
+		if ctx.Err() != nil {
 			return
 		}
 
-		// Phase 2: Final seam — subscribe to live BEFORE draining the last
-		// chunk, then dedup at the boundary. Same logic as the original
-		// StreamFrom: this is the only window where live events buffer.
-		live, liveCancel := hub.Subscribe(bufSize)
-		defer liveCancel()
-
+		// Phase 2: Final seam — drain remaining backfill from the DB, then
+		// switch to live with dedup. The live channel may already contain
+		// events from during the chunk phase; the dedup boundary handles them.
 		var lastBackfill int64 = cursor
 
-		err := p.PlaybackFrames(innerCtx, cursor, func(e store.LiveEvent) error {
+		err := p.PlaybackFrames(ctx, cursor, func(e store.LiveEvent) error {
 			select {
 			case out <- e:
 				lastBackfill = e.RelaySeq
 				return nil
-			case <-innerCtx.Done():
-				return innerCtx.Err()
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		})
-		if err != nil && innerCtx.Err() == nil {
+		if err != nil && ctx.Err() == nil {
 			return
 		}
 
@@ -109,17 +134,17 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 				}
 				select {
 				case out <- e:
-				case <-innerCtx.Done():
+				case <-ctx.Done():
 					return
 				}
-			case <-innerCtx.Done():
+			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 
 	cleanup := func() {
-		innerCancel()
+		liveCancel()
 		for range out {
 		}
 	}
