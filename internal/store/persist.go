@@ -221,6 +221,50 @@ func (p *LabelPersist) PlaybackFrames(ctx context.Context, since int64, cb func(
 	return nil
 }
 
+// PlaybackFramesChunk queries up to limit events with relay_seq > since in
+// ascending order, invoking cb for each. Returns the number of events delivered.
+func (p *LabelPersist) PlaybackFramesChunk(ctx context.Context, since int64, limit int, cb func(LiveEvent) error) (int, error) {
+	rows, err := p.store.DB().QueryContext(ctx,
+		`SELECT relay_seq, kind, labeler_did, frame_cbor FROM events
+		 WHERE relay_seq > ? ORDER BY relay_seq ASC LIMIT ?`,
+		since, limit,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query events for playback chunk: %w", err)
+	}
+	defer rows.Close()
+
+	n := 0
+	for rows.Next() {
+		var seq int64
+		var kind string
+		var did string
+		var frameBytes []byte
+
+		if err := rows.Scan(&seq, &kind, &did, &frameBytes); err != nil {
+			return n, fmt.Errorf("failed to scan event: %w", err)
+		}
+
+		le := LiveEvent{
+			RelaySeq:   seq,
+			Kind:       kind,
+			LabelerDID: did,
+			FrameCBOR:  frameBytes,
+		}
+
+		if err := cb(le); err != nil {
+			return n, err
+		}
+		n++
+	}
+
+	if err := rows.Err(); err != nil {
+		return n, fmt.Errorf("error iterating events: %w", err)
+	}
+
+	return n, nil
+}
+
 // Head returns the maximum relay_seq (the current head of the stream).
 // Returns 0 if no events exist.
 func (p *LabelPersist) Head(ctx context.Context) (int64, error) {

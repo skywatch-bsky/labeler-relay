@@ -54,14 +54,15 @@ type Server struct {
 	onDisconnect func()
 }
 
-// NewServer constructs a Server with defaultBufSize for subscribers.
-func NewServer(hub *Hub, persist *store.LabelPersist, registry *store.LabelerRegistry, log *slog.Logger, retentionWindowSeconds int64) *Server {
+// NewServer constructs a Server. Pass 0 for subBufSize to use defaultBufSize.
+func NewServer(hub *Hub, persist *store.LabelPersist, registry *store.LabelerRegistry, log *slog.Logger, retentionWindowSeconds int64, subBufSize int) *Server {
 	return &Server{
 		hub:                    hub,
 		persist:                persist,
 		registry:               registry,
 		log:                    log,
 		retentionWindowSeconds: retentionWindowSeconds,
+		subBufSize:             subBufSize,
 	}
 }
 

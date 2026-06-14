@@ -1,6 +1,6 @@
 # Config
 
-Last verified: 2026-06-02
+Last verified: 2026-06-13
 
 ## Purpose
 Centralizes environment-variable-based configuration loading and validation. Ensures env reading happens only at the app boundary, never in library packages.
@@ -25,6 +25,7 @@ Centralizes environment-variable-based configuration loading and validation. Ens
 | LABELER_RELAY_REQUIRE_SIG | true | Global default sig policy |
 | LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC | 500 | Per-labeler |
 | LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR | 100000 | Per-labeler |
+| LABELER_RELAY_SUBSCRIBER_BUF_SIZE | 512 | Per-subscriber event buffer |
 
 ## Key Files
 - `config.go` - Config struct, Load, validate, env helpers
