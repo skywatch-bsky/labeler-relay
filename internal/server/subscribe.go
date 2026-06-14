@@ -6,6 +6,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,17 @@ const (
 	// stalls long enough for its socket buffer to fill, writes fail after this
 	// deadline rather than blocking the handler goroutine indefinitely.
 	wsWriteTimeout = 5 * time.Second
+
+	// wsPingInterval is how often the server sends a ping to each consumer.
+	// Must be less than wsPongDeadline + wsPingInterval to avoid spurious
+	// timeout: the read deadline is reset to now+pongDeadline on every pong.
+	wsPingInterval = 30 * time.Second
+
+	// wsPongDeadline is how long the server waits for a pong reply before
+	// declaring the consumer dead. The read pump sets a read deadline of
+	// now+pongDeadline; if no pong (or any message) arrives before it
+	// expires, ReadMessage returns an error and the read pump cancels ctx.
+	wsPongDeadline = 10 * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -46,6 +58,10 @@ type Server struct {
 	subBufSize int
 	// writeTimeout overrides wsWriteTimeout for tests. Zero uses wsWriteTimeout.
 	writeTimeout time.Duration
+	// pingInterval overrides wsPingInterval for tests. Zero uses wsPingInterval.
+	pingInterval time.Duration
+	// pongDeadline overrides wsPongDeadline for tests. Zero uses wsPongDeadline.
+	pongDeadline time.Duration
 	// onConnect is called when a WebSocket connection is established.
 	// Used to increment consumer counters without importing metrics (FCIS).
 	onConnect func()
@@ -65,9 +81,10 @@ func NewServer(hub *Hub, persist *store.LabelPersist, registry *store.LabelerReg
 	}
 }
 
-// NewServerWithBufSize constructs a Server with a custom subscriber buffer size
-// and write timeout. Used in tests to trigger slow-consumer drop quickly.
-func NewServerWithBufSize(hub *Hub, persist *store.LabelPersist, registry *store.LabelerRegistry, log *slog.Logger, retentionWindowSeconds int64, subBufSize int, writeTimeout time.Duration) *Server {
+// NewServerWithBufSize constructs a Server with custom subscriber buffer size,
+// write timeout, and ping/pong intervals. Used in tests. Pass zero for
+// pingInterval/pongDeadline to use production defaults.
+func NewServerWithBufSize(hub *Hub, persist *store.LabelPersist, registry *store.LabelerRegistry, log *slog.Logger, retentionWindowSeconds int64, subBufSize int, writeTimeout, pingInterval, pongDeadline time.Duration) *Server {
 	return &Server{
 		hub:                    hub,
 		persist:                persist,
@@ -76,6 +93,8 @@ func NewServerWithBufSize(hub *Hub, persist *store.LabelPersist, registry *store
 		retentionWindowSeconds: retentionWindowSeconds,
 		subBufSize:             subBufSize,
 		writeTimeout:           writeTimeout,
+		pingInterval:           pingInterval,
+		pongDeadline:           pongDeadline,
 	}
 }
 
@@ -93,6 +112,20 @@ func (s *Server) effectiveWriteTimeout() time.Duration {
 	return wsWriteTimeout
 }
 
+func (s *Server) effectivePingInterval() time.Duration {
+	if s.pingInterval > 0 {
+		return s.pingInterval
+	}
+	return wsPingInterval
+}
+
+func (s *Server) effectivePongDeadline() time.Duration {
+	if s.pongDeadline > 0 {
+		return s.pongDeadline
+	}
+	return wsPongDeadline
+}
+
 // SetConnectCallback registers a function called when a WebSocket connection
 // is successfully established. Used to increment consumer counters without
 // importing metrics from server (FCIS).
@@ -107,6 +140,46 @@ func (s *Server) SetDisconnectCallback(fn func()) {
 	s.onDisconnect = fn
 }
 
+// readPump discards all inbound WebSocket messages and cancels ctx when the
+// read fails (close frame, broken pipe, pong deadline exceeded). It also
+// resets the read deadline on every pong so the connection stays alive as
+// long as the client is responsive.
+func (s *Server) readPump(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn) {
+	defer cancel()
+
+	pongWait := s.effectivePongDeadline()
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+// pingLoop sends periodic pings to the client. It exits when ctx is
+// cancelled (read pump detected disconnect) or a ping write fails.
+func (s *Server) pingLoop(ctx context.Context, conn *websocket.Conn) {
+	ticker := time.NewTicker(s.effectivePingInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			conn.SetWriteDeadline(time.Now().Add(s.effectiveWriteTimeout()))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
 // HandleSubscribeLabelers upgrades the connection to WebSocket and serves the
 // unified community.labeler.sync.subscribeLabelers stream.
 //
@@ -115,27 +188,28 @@ func (s *Server) SetDisconnectCallback(fn func()) {
 //  2. Evaluate cursor state (absent → live from head; present → CursorStatus).
 //  3. Upgrade to WebSocket.
 //  4. Track the number of active consumers for observability (AC10.3).
-//  5. StreamFrom the resolved since value.
-//  6. Range over the stream channel writing one frame per event.
-//  7. On channel close (slow-consumer drop), send ConsumerTooSlow and exit.
+//  5. Start read pump + ping loop for dead-consumer detection.
+//  6. StreamFrom the resolved since value.
+//  7. Range over the stream channel writing one frame per event.
+//  8. On channel close (slow-consumer drop), send ConsumerTooSlow and exit.
 func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
 	cursorParam := r.URL.Query().Get("cursor")
-
-	// Determine since before upgrading — FutureCursor must be rejected before
-	// the WS handshake so we can still write an HTTP error if needed. However,
-	// the protocol sends the error frame over WS, so we upgrade first for all
-	// cases and write the error frame on the WS connection.
 
 	// Upgrade to WebSocket.
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		// Upgrade already wrote the HTTP error response.
 		s.log.Error("websocket upgrade failed", "err", err)
 		return
 	}
 	defer conn.Close()
+
+	// Derive a context that the read pump cancels on client disconnect.
+	// r.Context() is inert after hijack, so this replaces it entirely.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go s.readPump(ctx, cancel, conn)
+	go s.pingLoop(ctx, conn)
 
 	// Track the number of active consumers for observability (AC10.3).
 	// Only increment after successful upgrade.
@@ -178,7 +252,6 @@ func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request)
 
 		switch state {
 		case store.CursorFuture:
-			// AC2.3: send error frame and close.
 			writeErr := writeWSFrame(conn, s.effectiveWriteTimeout(), func(w *frameWriter) error {
 				return WriteError(w, "FutureCursor", "cursor is ahead of the current stream head")
 			})
@@ -188,7 +261,6 @@ func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request)
 			return
 
 		case store.CursorOutdated:
-			// AC2.4: send #info OutdatedCursor message, then resume from floor.
 			floor, err := s.persist.RetentionFloor(ctx)
 			if err != nil {
 				s.log.Error("failed to read retention floor", "err", err)
@@ -207,7 +279,6 @@ func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request)
 				s.log.Debug("failed to write OutdatedCursor info frame", "err", writeErr)
 				return
 			}
-			// Resume from floor-1 so PlaybackFrames returns events starting at floor.
 			since = floor - 1
 
 		case store.CursorOK:
@@ -229,7 +300,6 @@ func (s *Server) HandleSubscribeLabelers(w http.ResponseWriter, r *http.Request)
 			return WriteMessage(w, t, e.FrameCBOR)
 		})
 		if writeErr != nil {
-			// Client is gone or write failed; exit cleanly.
 			s.log.Debug("write failed, closing subscriber", "err", writeErr)
 			return
 		}
