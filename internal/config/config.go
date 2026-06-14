@@ -28,6 +28,7 @@ type Config struct {
 	AutoSubscribeDiscovered bool
 	RequireSig              bool
 	UpstreamRateLimit       RateLimit
+	SubscriberBufSize       int
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -74,6 +75,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("failed to load config: %w", err)
 	}
 
+	cfg.SubscriberBufSize, err = parseIntEnv("LABELER_RELAY_SUBSCRIBER_BUF_SIZE", "subscriber_buf_size", 512)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
+	}
+
 	if err := validate(cfg); err != nil {
 		return Config{}, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -95,6 +101,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.UpstreamRateLimit.PerHour <= 0 {
 		return fmt.Errorf("upstream_rate_limit.per_hour must be positive, got %d", cfg.UpstreamRateLimit.PerHour)
+	}
+	if cfg.SubscriberBufSize <= 0 {
+		return fmt.Errorf("subscriber_buf_size must be positive, got %d", cfg.SubscriberBufSize)
 	}
 	return nil
 }

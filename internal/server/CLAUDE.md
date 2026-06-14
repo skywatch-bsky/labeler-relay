@@ -23,13 +23,14 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - **Boundary**: Must not import slurper, firehose, admin, or config
 
 ## Key Decisions
-- Subscribe-before-backfill in StreamFrom: live subscription starts before playback begins, closing the gap window. Dedup boundary handles overlap.
-- Per-subscriber buffer (default 512): bounds memory per consumer. Overflow triggers drop, not backpressure.
+- Chunked backfill in StreamFrom: large backlogs are drained in bufSize-sized chunks from the durable store without a live subscription. Only when within bufSize of head does the final seam subscribe to live, drain remaining backfill, and switch to live with dedup. This bounds live buffer pressure to one chunk regardless of backlog size.
+- Per-subscriber buffer (default 512, configurable via LABELER_RELAY_SUBSCRIBER_BUF_SIZE): bounds memory per consumer. Overflow triggers drop, not backpressure.
 - Write timeout (5s): prevents a stalled client from blocking the handler goroutine.
 - Read pump + ping/pong per connection: read pump goroutine discards inbound messages and cancels a derived context on read error. Ping loop sends periodic pings; pong handler resets the read deadline. r.Context() is inert after WS hijack, so the derived context is the sole cancellation signal.
 
 ## Invariants
 - StreamFrom's dedup boundary relies on relay_seq monotonicity: if persist ever minted non-monotonic seqs, dedup would break
+- StreamFrom creates an inner context for goroutine cancellation: cleanup cancels this context so the goroutine exits even when blocked on live events
 - Hub subscriber IDs are monotonically increasing integers (never reused within a process lifetime)
 - Frame body bytes are written verbatim from store -- never re-encoded at the server layer
 - /_health returns 200 with JSON (head_seq, labeler_count, retention_floor, retention_window_seconds) on success; 500 if a store read fails

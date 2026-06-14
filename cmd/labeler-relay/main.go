@@ -116,7 +116,7 @@ func run(ctx context.Context) error {
 
 	// Step 8: Build the HTTP server and wire consumer count callbacks.
 	retentionSecs := int64(cfg.RetentionWindow / time.Second)
-	srv := server.NewServer(hub, persist, registry, log, retentionSecs)
+	srv := server.NewServer(hub, persist, registry, log, retentionSecs, cfg.SubscriberBufSize)
 	srv.SetConnectCallback(func() {
 		metrics.ConsumerCount.Inc()
 	})

@@ -13,6 +13,7 @@ Single source of truth for event persistence and labeler registration. Owns the 
   - Broadcaster is called while holding the mutex -- must be non-blocking
   - Upsert stickiness: firehose upserts only update endpoint and updated_at (source/enabled preserved); manual upserts additionally claim source and enabled. Cursor and require_sig are never touched on conflict; last_error is cleared (a successful upsert means any prior discovery error is stale).
   - Playback returns events in ascending relay_seq order
+  - `PlaybackFramesChunk` supports LIMIT for chunked backfill
 - **Expects**: Single process owns the database (WAL mode, single-writer)
 
 ## Dependencies

@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -321,4 +322,136 @@ func TestSeamCtxCancellation(t *testing.T) {
 			t.Fatal("out channel did not close after ctx cancellation")
 		}
 	}
+}
+
+// TestSeamChunkedBackfillSurvivesSustainedIngest verifies issue #11: a consumer
+// resuming from the retention floor with a large backlog can catch up to live
+// under sustained ingest without being dropped.
+//
+// Mechanism: pre-persist a backlog much larger than bufSize, then start
+// StreamFrom with a small bufSize. Concurrently persist new events during the
+// backfill. With the old approach (subscribe-before-backfill), the live buffer
+// would overflow and the consumer would be dropped. With chunked backfill, the
+// live subscription only starts for the final chunk, so the buffer easily
+// absorbs the small number of concurrent events.
+func TestSeamChunkedBackfillSurvivesSustainedIngest(t *testing.T) {
+	p, cleanup := testPersist(t)
+	defer cleanup()
+
+	h := server.NewHub()
+	p.SetBroadcaster(h.Broadcast)
+
+	ctx := context.Background()
+
+	const backlog = 200
+	const bufSize = 16
+	const liveEvents = 30
+
+	for i := 1; i <= backlog; i++ {
+		_, err := p.PersistIngest(ctx, labelsEvent("did:plc:labeler", byte(i%256)))
+		require.NoError(t, err)
+	}
+
+	out, cleanup2, err := server.StreamFrom(ctx, p, h, 0, bufSize)
+	require.NoError(t, err)
+	defer cleanup2()
+
+	// Sustained ingest: persist new events while backfill is draining.
+	// With the old approach, these would fill the live buffer during the long
+	// backfill and cause a drop. With chunked backfill, the live subscription
+	// is only active for the final chunk.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := backlog + 1; i <= backlog+liveEvents; i++ {
+			_, err := p.PersistIngest(ctx, labelsEvent("did:plc:labeler", byte(i%256)))
+			if err != nil {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	total := backlog + liveEvents
+	seqs := make([]int64, 0, total)
+	for len(seqs) < total {
+		select {
+		case e, ok := <-out:
+			require.True(t, ok, "channel closed prematurely at %d events (ConsumerTooSlow); expected %d", len(seqs), total)
+			seqs = append(seqs, e.RelaySeq)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timeout: got %d events, expected %d", len(seqs), total)
+		}
+	}
+
+	wg.Wait()
+
+	expected := make([]int64, 0, total)
+	for i := int64(1); i <= int64(total); i++ {
+		expected = append(expected, i)
+	}
+	require.Equal(t, expected, seqs,
+		"chunked backfill must deliver all events in order without dropping the consumer")
+}
+
+// TestSeamChunkedBackfillDedup verifies that events persisted during the final
+// seam chunk are still deduplicated correctly (no duplicates at the boundary).
+func TestSeamChunkedBackfillDedup(t *testing.T) {
+	p, cleanup := testPersist(t)
+	defer cleanup()
+
+	h := server.NewHub()
+	p.SetBroadcaster(h.Broadcast)
+
+	ctx := context.Background()
+
+	const backlog = 100
+	const bufSize = 16
+
+	for i := 1; i <= backlog; i++ {
+		_, err := p.PersistIngest(ctx, labelsEvent("did:plc:labeler", byte(i%256)))
+		require.NoError(t, err)
+	}
+
+	out, cleanup2, err := server.StreamFrom(ctx, p, h, 0, bufSize)
+	require.NoError(t, err)
+	defer cleanup2()
+
+	// Consume a few events to prove chunked backfill started.
+	var first store.LiveEvent
+	select {
+	case e := <-out:
+		first = e
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first event")
+	}
+	require.Equal(t, int64(1), first.RelaySeq)
+
+	// Persist events while backfill is in progress. These will appear in both
+	// the DB (visible to remaining chunks) and the live buffer (once the final
+	// seam subscribes).
+	for i := backlog + 1; i <= backlog+5; i++ {
+		_, err := p.PersistIngest(ctx, labelsEvent("did:plc:labeler", byte(i%256)))
+		require.NoError(t, err)
+	}
+
+	total := backlog + 5
+	seqs := []int64{first.RelaySeq}
+	for len(seqs) < total {
+		select {
+		case e, ok := <-out:
+			require.True(t, ok, "channel closed prematurely")
+			seqs = append(seqs, e.RelaySeq)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timeout: got %d events, expected %d", len(seqs), total)
+		}
+	}
+
+	expected := make([]int64, 0, total)
+	for i := int64(1); i <= int64(total); i++ {
+		expected = append(expected, i)
+	}
+	require.Equal(t, expected, seqs,
+		"chunked backfill must deliver exactly-once across seam boundary")
 }
