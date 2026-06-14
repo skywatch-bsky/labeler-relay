@@ -21,13 +21,13 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - **Boundary**: Must not import slurper, firehose, admin, or config
 
 ## Key Decisions
-- Chunked backfill in StreamFrom: large backlogs are drained in bufSize-sized chunks from the durable store without a live subscription. Only when within bufSize of head does the final seam subscribe to live, drain remaining backfill, and switch to live with dedup. This bounds live buffer pressure to one chunk regardless of backlog size.
+- Chunked backfill in StreamFrom: live subscription starts synchronously (before StreamFrom returns) to guarantee no events are missed. Large backlogs are drained in bufSize-sized chunks from the durable store; a background drainer discards live events during this phase to prevent hub buffer overflow. Once within bufSize of head, the drainer stops and the final seam reads remaining backfill then switches to live with dedup.
 - Per-subscriber buffer (default 512, configurable via LABELER_RELAY_SUBSCRIBER_BUF_SIZE): bounds memory per consumer. Overflow triggers drop, not backpressure.
 - Write timeout (5s): prevents a stalled client from blocking the handler goroutine.
 
 ## Invariants
 - StreamFrom's dedup boundary relies on relay_seq monotonicity: if persist ever minted non-monotonic seqs, dedup would break
-- StreamFrom creates an inner context for goroutine cancellation: cleanup cancels this context so the goroutine exits even when blocked on live events
+- StreamFrom's cleanup closes the live channel (via liveCancel) to unblock the goroutine, then drains out. The live subscription MUST be synchronous (before StreamFrom returns) — moving it into the goroutine causes a race where events are lost between return and subscribe.
 - Hub subscriber IDs are monotonically increasing integers (never reused within a process lifetime)
 - Frame body bytes are written verbatim from store -- never re-encoded at the server layer
 - /_health returns 200 with JSON (head_seq, labeler_count, retention_floor, retention_window_seconds) on success; 500 if a store read fails
