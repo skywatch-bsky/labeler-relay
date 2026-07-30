@@ -9,7 +9,7 @@ Centralizes environment-variable-based configuration loading and validation. Ens
 - **Exposes**: `Config` struct, `Load() (Config, error)`
 - **Guarantees**:
   - All env vars prefixed `LABELER_RELAY_`
-  - Validation rejects empty admin token, non-positive retention/rate-limit values
+  - Validation rejects empty admin token, non-positive retention/rate-limit/buf-size values, and buf-size > 65536
   - Duration parsing supports Go's format plus "Nd" shorthand for days
   - Sensible defaults: `:8080`, `labeler-relay.db`, 14d retention, 500/s + 100k/h rate limits, sig required
 - **Expects**: `LABELER_RELAY_ADMIN_TOKEN` must be set (no default)
@@ -25,7 +25,7 @@ Centralizes environment-variable-based configuration loading and validation. Ens
 | LABELER_RELAY_REQUIRE_SIG | true | Global default sig policy |
 | LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC | 500 | Per-labeler |
 | LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR | 100000 | Per-labeler |
-| LABELER_RELAY_SUBSCRIBER_BUF_SIZE | 512 | Per-subscriber event buffer |
+| LABELER_RELAY_SUBSCRIBER_BUF_SIZE | 512 | Per-subscriber event buffer (max 65536) |
 
 ## Key Files
 - `config.go` - Config struct, Load, validate, env helpers

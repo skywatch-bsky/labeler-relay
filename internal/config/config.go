@@ -105,6 +105,9 @@ func validate(cfg Config) error {
 	if cfg.SubscriberBufSize <= 0 {
 		return fmt.Errorf("subscriber_buf_size must be positive, got %d", cfg.SubscriberBufSize)
 	}
+	if cfg.SubscriberBufSize > 65536 {
+		return fmt.Errorf("subscriber_buf_size must be at most 65536, got %d", cfg.SubscriberBufSize)
+	}
 	return nil
 }
 

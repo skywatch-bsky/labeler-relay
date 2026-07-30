@@ -330,10 +330,10 @@ func TestSeamCtxCancellation(t *testing.T) {
 //
 // Mechanism: pre-persist a backlog much larger than bufSize, then start
 // StreamFrom with a small bufSize. Concurrently persist new events during the
-// backfill. With the old approach (subscribe-before-backfill), the live buffer
-// would overflow and the consumer would be dropped. With chunked backfill, the
-// live subscription only starts for the final chunk, so the buffer easily
-// absorbs the small number of concurrent events.
+// backfill. The drainer runs throughout all DB-reading phases, discarding live
+// events (which are read from the DB instead). After the DB is drained
+// (including a straggler read), the drainer stops and the stream switches to
+// live with dedup. This prevents the live buffer from overflowing.
 func TestSeamChunkedBackfillSurvivesSustainedIngest(t *testing.T) {
 	p, cleanup := testPersist(t)
 	defer cleanup()
@@ -357,9 +357,9 @@ func TestSeamChunkedBackfillSurvivesSustainedIngest(t *testing.T) {
 	defer cleanup2()
 
 	// Sustained ingest: persist new events while backfill is draining.
-	// With the old approach, these would fill the live buffer during the long
-	// backfill and cause a drop. With chunked backfill, the live subscription
-	// is only active for the final chunk.
+	// The drainer discards these from the live channel; they are read from
+	// the DB instead. After DB drain + straggler read, the stream switches
+	// to live with dedup.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -429,8 +429,10 @@ func TestSeamChunkedBackfillDedup(t *testing.T) {
 	require.Equal(t, int64(1), first.RelaySeq)
 
 	// Persist events while backfill is in progress. These will appear in both
-	// the DB (visible to remaining chunks) and the live buffer (once the final
-	// seam subscribes).
+	// the DB (visible to remaining chunks) and the live buffer. The drainer
+	// discards them from live; they're read from the DB. The straggler read
+	// after drainer stop catches any that arrived between the last chunk and
+	// drainer stop. The dedup boundary then drops any remaining live dups.
 	for i := backlog + 1; i <= backlog+5; i++ {
 		_, err := p.PersistIngest(ctx, labelsEvent("did:plc:labeler", byte(i%256)))
 		require.NoError(t, err)
