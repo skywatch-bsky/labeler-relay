@@ -21,7 +21,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - **Boundary**: Must not import slurper, firehose, admin, or config
 
 ## Key Decisions
-- Chunked backfill in StreamFrom: live subscription starts synchronously (before StreamFrom returns) to guarantee no events are missed. Large backlogs are drained in bufSize-sized chunks from the durable store; a background drainer discards live events during all DB-reading phases to prevent hub buffer overflow. The drainer runs throughout both bulk backfill and the final seam — only after the DB is fully drained (including a straggler read after drainer stop) does the stream switch to live with dedup. This prevents the live channel from overflowing even under sustained ingest during the final seam.
+- Chunked backfill in StreamFrom: live subscription starts synchronously (before StreamFrom returns) to guarantee no events are missed. Large backlogs are drained in bufSize-sized chunks from the durable store; a background drainer discards live events during all DB-reading phases to prevent hub buffer overflow. The drainer runs throughout both bulk backfill and the final seam — only after the DB returns 0 rows does the drainer stop and a single bounded straggler read catches events that arrived in the tiny window between the last empty query and drainer stop. Then the stream switches to live with dedup.
 - Per-subscriber buffer (default 512, configurable via LABELER_RELAY_SUBSCRIBER_BUF_SIZE): bounds memory per consumer. Overflow triggers drop, not backpressure.
 - Write timeout (5s): prevents a stalled client from blocking the handler goroutine.
 
