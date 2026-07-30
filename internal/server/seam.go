@@ -24,18 +24,22 @@ import (
 //     overflowing by discarding buffered events (they'll be read from the DB).
 //  3. Once within bufSize of head, continue with bounded chunked reads (still
 //     with the drainer running) until the DB returns 0 rows (fully drained).
-//     Then stop the drainer and do one final bounded straggler read to catch
-//     events that arrived between the last empty query and the drainer stop.
-//     This replaces the original unbounded PlaybackFrames call, which could
-//     overflow the live channel under sustained ingest.
-//  4. Switch to live with the dedup boundary dropping any events already sent
+//  4. Stop the drainer and do a final straggler read loop: bounded chunks
+//     without the drainer until the DB returns 0 rows again. This catches
+//     events that arrived between the last Phase 2 query and the drainer stop
+//     (drained from live, so only in the DB). If the consumer is too slow,
+//     the Hub closes live and Phase 3 exits cleanly.
+//  5. Switch to live with the dedup boundary dropping any events already sent
 //     during backfill.
 //
-// This bounds the live buffer requirement: the drainer prevents overflow
-// throughout all DB-reading phases. The final straggler read is a single
-// bounded chunk — the window between the empty query and drainer stop is
-// tiny, so at most a few events can arrive.
+// An internal cancellable context (streamCtx) ensures cleanup can terminate
+// all loops even if the caller's context is still alive.
 func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int64, bufSize int) (<-chan store.LiveEvent, func(), error) {
+	// Internal cancellable context so cleanup can signal the goroutine to
+	// stop even if the caller's ctx is still alive (e.g., the HTTP handler
+	// returns early but the request context hasn't been cancelled yet).
+	streamCtx, streamCancel := context.WithCancel(ctx)
+
 	// Subscribe to live synchronously — captures all events from this moment.
 	live, liveCancel := hub.Subscribe(bufSize)
 
@@ -44,6 +48,7 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 	go func() {
 		defer close(out)
 		defer liveCancel()
+		defer streamCancel()
 
 		cursor := since
 
@@ -61,19 +66,21 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 					}
 				case <-stopDrain:
 					return
+				case <-streamCtx.Done():
+					return
 				}
 			}
 		}()
 
 		for {
-			if ctx.Err() != nil {
+			if streamCtx.Err() != nil {
 				close(stopDrain)
 				<-drainDone
 				return
 			}
 
-			head, err := p.Head(ctx)
-			if err != nil || ctx.Err() != nil {
+			head, err := p.Head(streamCtx)
+			if err != nil || streamCtx.Err() != nil {
 				close(stopDrain)
 				<-drainDone
 				return
@@ -84,16 +91,16 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 				break
 			}
 
-			n, err := p.PlaybackFramesChunk(ctx, cursor, bufSize, func(e store.LiveEvent) error {
+			n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
 				select {
 				case out <- e:
 					cursor = e.RelaySeq
 					return nil
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-streamCtx.Done():
+					return streamCtx.Err()
 				}
 			})
-			if err != nil && ctx.Err() == nil {
+			if err != nil && streamCtx.Err() == nil {
 				close(stopDrain)
 				<-drainDone
 				return
@@ -104,32 +111,25 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 		}
 
 		// Phase 2: Final seam — continue draining the DB in bounded chunks
-		// with the drainer STILL RUNNING. This is critical: if we stopped the
-		// drainer here and used unbounded PlaybackFrames (as the original code
-		// did), a slow consumer could cause out to block, the live channel
-		// would fill up with no drainer to absorb it, and the Hub would drop
-		// the subscription — permanently losing events.
-		//
-		// By keeping the drainer running and using bounded chunks, we get the
-		// same overflow protection as Phase 1. We break when a chunk returns
+		// with the drainer STILL RUNNING. We break when a chunk returns
 		// 0 rows, meaning the DB is fully drained at that moment.
 		for {
-			if ctx.Err() != nil {
+			if streamCtx.Err() != nil {
 				close(stopDrain)
 				<-drainDone
 				return
 			}
 
-			n, err := p.PlaybackFramesChunk(ctx, cursor, bufSize, func(e store.LiveEvent) error {
+			n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
 				select {
 				case out <- e:
 					cursor = e.RelaySeq
 					return nil
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-streamCtx.Done():
+					return streamCtx.Err()
 				}
 			})
-			if err != nil && ctx.Err() == nil {
+			if err != nil && streamCtx.Err() == nil {
 				close(stopDrain)
 				<-drainDone
 				return
@@ -144,35 +144,48 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 		close(stopDrain)
 		<-drainDone
 
-		if ctx.Err() != nil {
+		if streamCtx.Err() != nil {
 			return
 		}
 
-		// Final straggler read: events may have been persisted between the
-		// last PlaybackFramesChunk query (which returned 0) and the drainer
-		// stop. Those events were drained from the live channel by the
-		// drainer (so they're NOT in live) but ARE in the DB. Do ONE bounded
-		// read to catch them.
+		// Straggler read: events may have been persisted between the last
+		// PlaybackFramesChunk query (which returned 0) and the drainer stop.
+		// Those events were drained from the live channel by the drainer
+		// (so they're NOT in live) but ARE in the DB. Read them now in
+		// bounded chunks until the DB is drained again.
 		//
-		// This window is tiny (between the empty query and close(stopDrain)),
-		// so the number of stragglers is small — well within bufSize. Events
-		// that arrive during this read go to the live channel and will be
-		// delivered in Phase 3 with dedup.
-		_, _ = p.PlaybackFramesChunk(ctx, cursor, bufSize, func(e store.LiveEvent) error {
-			select {
-			case out <- e:
-				cursor = e.RelaySeq
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
+		// This loop is safe without the drainer because:
+		// - Each chunk is bounded (bufSize), so out can only block briefly.
+		// - If the consumer is too slow and the Hub drops the subscription,
+		//   live is closed — Phase 3 will detect this and exit. The events
+		//   already delivered to out from the DB are still valid and ordered.
+		// - If cleanup is called, streamCtx is cancelled and we exit.
+		// - The loop terminates when the DB returns 0 rows (no stragglers).
+		for {
+			if streamCtx.Err() != nil {
+				return
 			}
-		})
+
+			n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
+				select {
+				case out <- e:
+					cursor = e.RelaySeq
+					return nil
+				case <-streamCtx.Done():
+					return streamCtx.Err()
+				}
+			})
+			if err != nil && streamCtx.Err() == nil {
+				return
+			}
+			if n == 0 {
+				break // DB fully drained — no stragglers
+			}
+		}
 
 		// Phase 3: Live with dedup — drop any live events already sent during
-		// backfill (their relay_seq <= cursor). Events that arrived during
-		// backfill were drained by the drainer and re-read from the DB above;
-		// events that arrived after the drainer stopped are in the live channel
-		// and will be delivered here. The dedup boundary ensures exactly-once.
+		// backfill (their relay_seq <= cursor). Events that arrived after the
+		// drainer stopped are in the live channel and will be delivered here.
 		lastBackfill := cursor
 		for {
 			select {
@@ -185,16 +198,17 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 				}
 				select {
 				case out <- e:
-				case <-ctx.Done():
+				case <-streamCtx.Done():
 					return
 				}
-			case <-ctx.Done():
+			case <-streamCtx.Done():
 				return
 			}
 		}
 	}()
 
 	cleanup := func() {
+		streamCancel()
 		liveCancel()
 		for range out {
 		}
