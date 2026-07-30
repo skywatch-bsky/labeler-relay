@@ -24,13 +24,13 @@ import (
 //     overflowing by discarding buffered events (they'll be read from the DB).
 //  3. Once within bufSize of head, continue with bounded chunked reads (still
 //     with the drainer running) until the DB returns 0 rows (fully drained).
-//  4. Stop the drainer and do a final straggler read loop: bounded chunks
-//     without the drainer until the DB returns 0 rows again. This catches
-//     events that arrived between the last Phase 2 query and the drainer stop
-//     (drained from live, so only in the DB). If the consumer is too slow,
-//     the Hub closes live and Phase 3 exits cleanly.
-//  5. Switch to live with the dedup boundary dropping any events already sent
-//     during backfill.
+//  4. Stop the drainer and enter an interleaved DB + live phase: read one
+//     bounded chunk from the DB, then drain available live events (with dedup).
+//     This catches stragglers (events drained from live but in the DB) while
+//     preventing live channel overflow under sustained ingest. When the DB
+//     returns < bufSize rows, switch to pure live with dedup.
+//  5. Pure live with dedup: deliver events from the live channel, dropping any
+//     already sent during backfill.
 //
 // An internal cancellable context (streamCtx) ensures cleanup can terminate
 // all loops even if the caller's context is still alive.
@@ -148,61 +148,83 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 			return
 		}
 
-		// Straggler read: events may have been persisted between the last
-		// PlaybackFramesChunk query (which returned 0) and the drainer stop.
-		// Those events were drained from the live channel by the drainer
-		// (so they're NOT in live) but ARE in the DB. Read them now in
-		// bounded chunks until the DB is drained again.
+		// Phase 3: Interleaved DB + live with dedup.
 		//
-		// This loop is safe without the drainer because:
-		// - Each chunk is bounded (bufSize), so out can only block briefly.
-		// - If the consumer is too slow and the Hub drops the subscription,
-		//   live is closed — Phase 3 will detect this and exit. The events
-		//   already delivered to out from the DB are still valid and ordered.
-		// - If cleanup is called, streamCtx is cancelled and we exit.
-		// - The loop terminates when the DB returns 0 rows (no stragglers).
+		// After stopping the drainer, some events may have been persisted
+		// between the last Phase 2 empty query and the drainer stop. Those
+		// were drained from live (not in the live channel) but ARE in the DB.
+		// We must read them from the DB. But we also must drain the live
+		// channel to prevent overflow under sustained ingest.
+		//
+		// Solution: interleave bounded DB reads with live draining. Read one
+		// chunk from the DB, then drain all available live events (with dedup).
+		// If the DB returned a full chunk, there may be more — loop. If the DB
+		// returned < bufSize (or 0), the DB is drained and we switch to pure
+		// live (Phase 4 below).
+		dbDrained := false
 		for {
 			if streamCtx.Err() != nil {
 				return
 			}
 
-			n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
-				select {
-				case out <- e:
-					cursor = e.RelaySeq
-					return nil
-				case <-streamCtx.Done():
-					return streamCtx.Err()
+			if !dbDrained {
+				n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
+					select {
+					case out <- e:
+						cursor = e.RelaySeq
+						return nil
+					case <-streamCtx.Done():
+						return streamCtx.Err()
+					}
+				})
+				if err != nil && streamCtx.Err() == nil {
+					return
 				}
-			})
-			if err != nil && streamCtx.Err() == nil {
-				return
-			}
-			if n == 0 {
-				break // DB fully drained — no stragglers
-			}
-		}
+				if n < bufSize {
+					dbDrained = true
+				}
 
-		// Phase 3: Live with dedup — drop any live events already sent during
-		// backfill (their relay_seq <= cursor). Events that arrived after the
-		// drainer stopped are in the live channel and will be delivered here.
-		lastBackfill := cursor
-		for {
-			select {
-			case e, ok := <-live:
-				if !ok {
-					return
+				// Drain available live events (non-blocking) to prevent
+				// overflow while we loop back for more DB reads.
+				drained := true
+				for drained {
+					select {
+					case e, ok := <-live:
+						if !ok {
+							return // Hub dropped the subscription
+						}
+						if e.RelaySeq <= cursor {
+							continue // dedup: already sent from DB
+						}
+						select {
+						case out <- e:
+							cursor = e.RelaySeq
+						case <-streamCtx.Done():
+							return
+						}
+					default:
+						drained = false
+					}
 				}
-				if e.RelaySeq <= lastBackfill {
-					continue
-				}
+			} else {
+				// Phase 4: DB fully drained — pure live with dedup.
 				select {
-				case out <- e:
+				case e, ok := <-live:
+					if !ok {
+						return
+					}
+					if e.RelaySeq <= cursor {
+						continue
+					}
+					select {
+					case out <- e:
+						cursor = e.RelaySeq
+					case <-streamCtx.Done():
+						return
+					}
 				case <-streamCtx.Done():
 					return
 				}
-			case <-streamCtx.Done():
-				return
 			}
 		}
 	}()

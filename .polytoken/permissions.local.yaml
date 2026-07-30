@@ -1,0 +1,8 @@
+version: 2
+allow:
+- tool: shell_exec
+  args:
+    command_tokens:
+    - git
+    - rm
+    - '*'
