@@ -428,7 +428,7 @@ func runRelay(ctx context.Context, addr, dbPath, adminToken string) error {
 
 	adminAPI := admin.NewAPI(registry, resolver, poke, adminToken)
 
-	srv := server.NewServer(hub, persist, registry, log, int64((336 * time.Hour).Seconds()))
+	srv := server.NewServer(hub, persist, registry, log, int64((336 * time.Hour).Seconds()), 0)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/xrpc/community.labeler.sync.subscribeLabelers", srv.HandleSubscribeLabelers)

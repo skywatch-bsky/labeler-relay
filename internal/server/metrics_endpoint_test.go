@@ -34,7 +34,7 @@ func testMetricsServer(t *testing.T) (*httptest.Server, *store.LabelPersist, *st
 	require.NoError(t, metrics.Register(reg2))
 
 	const retentionWindow = 7200
-	srv := server.NewServer(h, p, reg, slog.Default(), retentionWindow)
+	srv := server.NewServer(h, p, reg, slog.Default(), retentionWindow, 0)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_health", srv.HandleHealth)

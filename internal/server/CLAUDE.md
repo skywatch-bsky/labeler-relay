@@ -1,6 +1,6 @@
 # Server
 
-Last verified: 2026-06-02
+Last verified: 2026-06-13
 
 ## Purpose
 Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSocket. Handles cursor validation, backfill-to-live seam stitching, and XRPC frame encoding.
@@ -21,12 +21,13 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - **Boundary**: Must not import slurper, firehose, admin, or config
 
 ## Key Decisions
-- Subscribe-before-backfill in StreamFrom: live subscription starts before playback begins, closing the gap window. Dedup boundary handles overlap.
-- Per-subscriber buffer (default 512): bounds memory per consumer. Overflow triggers drop, not backpressure.
+- Chunked backfill in StreamFrom: live subscription starts synchronously (before StreamFrom returns) to guarantee no events are missed. Large backlogs are drained in bufSize-sized chunks from the durable store; a background drainer discards live events during bulk backfill (Phase 1) and the final seam (Phase 2) to prevent hub buffer overflow. After the DB is drained (returns 0 rows), the drainer stops and a straggler read loop (bounded chunks without drainer) catches events drained from live but not yet read from DB (Phase 3). If the consumer can't keep up, the Hub drops the subscription (ConsumerTooSlow). Then the stream switches to pure live with dedup (Phase 4). An internal cancellable context (streamCtx) ensures cleanup can terminate all loops.
+- Per-subscriber buffer (default 512, configurable via LABELER_RELAY_SUBSCRIBER_BUF_SIZE): bounds memory per consumer. Overflow triggers drop, not backpressure.
 - Write timeout (5s): prevents a stalled client from blocking the handler goroutine.
 
 ## Invariants
 - StreamFrom's dedup boundary relies on relay_seq monotonicity: if persist ever minted non-monotonic seqs, dedup would break
+- StreamFrom's cleanup closes the live channel (via liveCancel) to unblock the goroutine, then drains out. The live subscription MUST be synchronous (before StreamFrom returns) — moving it into the goroutine causes a race where events are lost between return and subscribe.
 - Hub subscriber IDs are monotonically increasing integers (never reused within a process lifetime)
 - Frame body bytes are written verbatim from store -- never re-encoded at the server layer
 - /_health returns 200 with JSON (head_seq, labeler_count, retention_floor, retention_window_seconds) on success; 500 if a store read fails

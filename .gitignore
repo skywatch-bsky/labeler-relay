@@ -12,3 +12,4 @@ labeler-relay-linux-amd64
 labeler-relay-linux-arm64
 Dockerfile.k3s
 /.claude/scheduled_tasks.lock
+resolve-labelers.sh

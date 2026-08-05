@@ -1,8 +1,8 @@
 // pattern: Imperative Shell
 // StreamFrom composes durable Playback + live Hub into a single stream with
-// no gap and no duplicate at the seam. Both backfill and live are keyed on
-// the monotonic relay seq; the seam dedup boundary filters live events that
-// were already sent during backfill.
+// no gap and no duplicate at the seam. Backfill is chunked: a background
+// drainer protects the live channel during bulk backfill, then bounded
+// chunked reads handle the final seam without unbounded DB queries.
 
 package server
 
@@ -13,89 +13,206 @@ import (
 )
 
 // StreamFrom delivers events with relay_seq > since in ascending order,
-// initially from the durable store via Playback, then switching to live
+// initially from the durable store via chunked playback, then switching to live
 // events from the Hub. It returns a channel of LiveEvent and a cleanup func.
 //
-// Algorithm (load-bearing order):
-// 1. Subscribe to live BEFORE draining backfill to close the gap window.
-// 2. Spawn a goroutine that:
-//    a. Drain Playback(ctx, since, ...) in ascending relay_seq.
-//    b. Track lastBackfill = the highest relay_seq sent during backfill.
-//    c. Then range over live: DROP any e.RelaySeq <= lastBackfill (already sent).
-//    d. Forward the rest to out.
-//    e. On ctx-done or live-closed (slow drop), close out and cancel live sub.
-// 3. Return out and a cleanup that cancels live and drains out.
+// Algorithm (chunked backfill):
+//  1. Subscribe to live BEFORE returning (synchronous) — same as the original.
+//     This guarantees no events are missed after StreamFrom returns.
+//  2. Drain the backlog in chunks of bufSize events from the durable store.
+//     During this phase a background drainer keeps the live channel from
+//     overflowing by discarding buffered events (they'll be read from the DB).
+//  3. Once within bufSize of head, continue with bounded chunked reads (still
+//     with the drainer running) until the DB returns 0 rows (fully drained).
+//  4. Stop the drainer and read remaining stragglers from the DB in bounded
+//     chunks until the DB returns 0 rows again. If the consumer can't keep up,
+//     the Hub drops the subscription (ConsumerTooSlow) and Phase 4 exits.
+//  5. Pure live with dedup: deliver events from the live channel, dropping any
+//     already sent during backfill (relay_seq <= last DB seq).
 //
-// Because both backfill and live are ordered by the SAME monotonic relay seq,
-// and live events broadcast in seq order (Phase 2 Task 4: under persist mu),
-// the dedup boundary guarantees exactly-once delivery across the seam.
+// An internal cancellable context (streamCtx) ensures cleanup can terminate
+// all loops even if the caller's context is still alive.
 func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int64, bufSize int) (<-chan store.LiveEvent, func(), error) {
-	// Step 1: Subscribe to live BEFORE draining backfill.
-	// This captures all events from this moment onward (after head at subscribe time).
+	// Internal cancellable context so cleanup can signal the goroutine to
+	// stop even if the caller's ctx is still alive (e.g., the HTTP handler
+	// returns early but the request context hasn't been cancelled yet).
+	streamCtx, streamCancel := context.WithCancel(ctx)
+
+	// Subscribe to live synchronously — captures all events from this moment.
 	live, liveCancel := hub.Subscribe(bufSize)
 
-	// out: channel for the caller to consume from.
 	out := make(chan store.LiveEvent, bufSize)
 
-	// Spawn the backfill→live stitcher goroutine.
 	go func() {
 		defer close(out)
 		defer liveCancel()
+		defer streamCancel()
 
-		var lastBackfill int64 = since
+		cursor := since
 
-		// Step 2a: Drain Playback in ascending order.
-		err := p.PlaybackFrames(ctx, since, func(e store.LiveEvent) error {
-			select {
-			case out <- e:
-				// Update lastBackfill to track how far we've sent.
-				lastBackfill = e.RelaySeq
-				return nil
-			case <-ctx.Done():
-				// Context cancelled; stop draining and let cleanup close out.
-				return ctx.Err()
+		// Phase 1: Chunked backfill. A background goroutine drains the live
+		// channel to prevent the Hub from dropping us while we read from the DB.
+		drainDone := make(chan struct{})
+		stopDrain := make(chan struct{})
+		go func() {
+			defer close(drainDone)
+			for {
+				select {
+				case _, ok := <-live:
+					if !ok {
+						return
+					}
+				case <-stopDrain:
+					return
+				case <-streamCtx.Done():
+					return
+				}
 			}
-		})
-		if err != nil && ctx.Err() == nil {
-			// PlaybackFrames failed (not due to ctx cancel).
-			// Just exit and let out close.
+		}()
+
+		for {
+			if streamCtx.Err() != nil {
+				close(stopDrain)
+				<-drainDone
+				return
+			}
+
+			head, err := p.Head(streamCtx)
+			if err != nil || streamCtx.Err() != nil {
+				close(stopDrain)
+				<-drainDone
+				return
+			}
+
+			gap := head - cursor
+			if gap <= int64(bufSize) {
+				break
+			}
+
+			n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
+				select {
+				case out <- e:
+					cursor = e.RelaySeq
+					return nil
+				case <-streamCtx.Done():
+					return streamCtx.Err()
+				}
+			})
+			if err != nil && streamCtx.Err() == nil {
+				close(stopDrain)
+				<-drainDone
+				return
+			}
+			if n == 0 {
+				break
+			}
+		}
+
+		// Phase 2: Final seam — continue draining the DB in bounded chunks
+		// with the drainer STILL RUNNING. We break when a chunk returns
+		// 0 rows, meaning the DB is fully drained at that moment.
+		for {
+			if streamCtx.Err() != nil {
+				close(stopDrain)
+				<-drainDone
+				return
+			}
+
+			n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
+				select {
+				case out <- e:
+					cursor = e.RelaySeq
+					return nil
+				case <-streamCtx.Done():
+					return streamCtx.Err()
+				}
+			})
+			if err != nil && streamCtx.Err() == nil {
+				close(stopDrain)
+				<-drainDone
+				return
+			}
+			if n == 0 {
+				break // DB drained — no more events at this moment
+			}
+		}
+
+		// Stop the drainer. After this, events arriving on the live channel
+		// accumulate in the live buffer (capacity bufSize).
+		close(stopDrain)
+		<-drainDone
+
+		if streamCtx.Err() != nil {
 			return
 		}
 
-		// Step 2b: Switch to live feed.
-		// Range over live until it closes (slow drop) or ctx done.
+		// Phase 3: Straggler read + pure live with dedup.
+		//
+		// After stopping the drainer, some events may have been persisted
+		// between the last Phase 2 empty query and the drainer stop. Those
+		// were drained from live (not in the live channel) but ARE in the DB.
+		// Read them in bounded chunks until the DB is drained again.
+		//
+		// This loop terminates because:
+		// - If the consumer is keeping up, out doesn't block and the DB
+		//   drains quickly (bounded chunks, fast SQLite reads).
+		// - If the consumer can't keep up, out blocks, the live channel fills,
+		//   the Hub drops the subscription (ConsumerTooSlow), and Phase 4
+		//   detects the closed live channel and exits.
+		// - If cleanup is called, streamCtx is cancelled and we exit.
+		//
+		// Events that arrive during this loop go to the live channel. They'll
+		// be delivered by Phase 4 with dedup (e.RelaySeq <= lastBackfill).
+		for {
+			if streamCtx.Err() != nil {
+				return
+			}
+
+			n, err := p.PlaybackFramesChunk(streamCtx, cursor, bufSize, func(e store.LiveEvent) error {
+				select {
+				case out <- e:
+					cursor = e.RelaySeq
+					return nil
+				case <-streamCtx.Done():
+					return streamCtx.Err()
+				}
+			})
+			if err != nil && streamCtx.Err() == nil {
+				return
+			}
+			if n == 0 {
+				break // DB fully drained — no stragglers
+			}
+		}
+
+		// Phase 4: Pure live with dedup — drop any live events already sent
+		// during backfill (their relay_seq <= cursor, the last DB seq delivered).
+		// Events that arrived after the drainer stopped are in the live channel
+		// and will be delivered here. The dedup boundary ensures exactly-once.
+		lastBackfill := cursor
 		for {
 			select {
 			case e, ok := <-live:
 				if !ok {
-					// Live closed due to slow drop; exit and close out.
 					return
 				}
-				// Step 2c: Dedup boundary — drop any e.RelaySeq <= lastBackfill.
-				// These were already sent during backfill.
 				if e.RelaySeq <= lastBackfill {
-					// Already sent; skip.
 					continue
 				}
-				// Step 2d: Forward to out.
 				select {
 				case out <- e:
-					// sent
-				case <-ctx.Done():
-					// Context cancelled; exit and let cleanup close out.
+				case <-streamCtx.Done():
 					return
 				}
-			case <-ctx.Done():
-				// Context cancelled; exit and let cleanup close out.
+			case <-streamCtx.Done():
 				return
 			}
 		}
 	}()
 
-	// Cleanup: cancel live subscription and drain out channel.
 	cleanup := func() {
+		streamCancel()
 		liveCancel()
-		// Drain out to unblock the goroutine if it's waiting on a send.
 		for range out {
 		}
 	}

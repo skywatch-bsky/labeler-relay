@@ -27,7 +27,7 @@ func testHealthServer(t *testing.T) (*httptest.Server, *store.LabelPersist, *sto
 	p.SetBroadcaster(h.Broadcast)
 
 	const retentionWindow = 7200
-	srv := server.NewServer(h, p, reg, slog.Default(), retentionWindow)
+	srv := server.NewServer(h, p, reg, slog.Default(), retentionWindow, 0)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_health", srv.HandleHealth)

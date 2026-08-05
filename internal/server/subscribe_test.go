@@ -42,7 +42,7 @@ func testSubscribeServerWithBufSize(t *testing.T, subBufSize int) (*httptest.Ser
 		// Use a 100ms write timeout so stalled connections are detected quickly in tests.
 		srv = server.NewServerWithBufSize(h, p, reg, slog.Default(), 3600, subBufSize, 100*time.Millisecond)
 	} else {
-		srv = server.NewServer(h, p, reg, slog.Default(), 3600)
+		srv = server.NewServer(h, p, reg, slog.Default(), 3600, 0)
 	}
 
 	mux := http.NewServeMux()
