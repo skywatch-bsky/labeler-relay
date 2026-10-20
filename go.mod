@@ -2,8 +2,6 @@ module github.com/scarndp/labeler-relay
 
 go 1.27.3
 
-toolchain go1.27.3
-
 require (
 	github.com/RussellLuo/slidingwindow v0.0.0-20200528002341-535bb99d338b
 	github.com/bluesky-social/indigo v0.0.0-20260529183052-5368f55344e0
