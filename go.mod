@@ -1,6 +1,6 @@
 module github.com/scarndp/labeler-relay
 
-go 1.26.1
+go 1.27.3
 
 toolchain go1.27.3
 
