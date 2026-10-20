@@ -1,9 +1,9 @@
 # labeler-relay
 
-Last verified: 2026-06-02
+Last verified: 2026-10-20
 
 ## Tech Stack
-- Language: Go 1.26
+- Language: Go 1.27.3 (enforced minimum in go.mod; security floor)
 - Database: SQLite (WAL mode, modernc.org/sqlite)
 - Wire format: CBOR (whyrusleeping/cbor-gen for codegen)
 - WebSocket: gorilla/websocket

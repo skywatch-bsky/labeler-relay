@@ -6,7 +6,7 @@ A Go service that aggregates AT Protocol labeler streams into one WebSocket outp
 
 ## Build
 
-Requires Go 1.26+.
+Requires Go 1.27.3+. The go.mod `go` directive enforces this minimum, so older toolchains refuse to build.
 
 ```bash
 git clone https://github.com/scarndp/labeler-relay.git
@@ -181,7 +181,7 @@ WantedBy=multi-user.target
 ## Docker
 
 ```dockerfile
-FROM golang:1.26 AS build
+FROM golang:1.27.3 AS build
 WORKDIR /src
 COPY . .
 RUN go build -o /labeler-relay ./cmd/labeler-relay/
