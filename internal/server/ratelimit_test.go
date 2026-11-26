@@ -100,29 +100,53 @@ func TestRateLimiter_IdleEviction(t *testing.T) {
 	}
 	require.Len(t, q.windows, 4)
 
-	// Every tracked entry is idle beyond the horizon; all are evicted and
-	// only the new IP remains.
-	require.True(t, q.allowAt("10.0.2.9", rlBase.Add(ipIdleEviction+time.Minute)))
-	require.Len(t, q.windows, 1)
+	// Every tracked entry is idle an hour later. The least recently seen —
+	// an idle entry by construction — is evicted to make room and the map
+	// stays bounded at the cap.
+	require.True(t, q.allowAt("10.0.2.9", rlBase.Add(time.Hour+time.Minute)))
+	require.Len(t, q.windows, 4, "map must stay at the cap")
+	require.Contains(t, q.windows, "10.0.2.9")
+	require.NotContains(t, q.windows, "10.0.2.0", "least recently seen entry must be evicted first")
 }
 
-func TestRateLimiter_StaleHeapEntryNotEvicted(t *testing.T) {
-	// An IP touched after its eviction-heap entry was pushed must not be
-	// evicted as "oldest": the stale heap key is replaced before eviction
-	// decides. This pins the heap-based eviction order.
+func TestRateLimiter_TouchedIPNotEvicted(t *testing.T) {
+	// An IP touched after admission must not be evicted as "least recently
+	// seen": its recency moves to the front on every touch. This pins the
+	// LRU eviction order.
 	q := newQueryRateLimiter(10, 1000, 2)
 	defer q.Close()
 
 	require.True(t, q.allowAt("10.9.0.1", rlBase))
-	require.True(t, q.allowAt("10.9.0.1", rlBase.Add(10*time.Second)), "ip1 touched again: its heap key goes stale")
-	require.True(t, q.allowAt("10.9.0.2", rlBase.Add(5*time.Second)))
+	require.True(t, q.allowAt("10.9.0.2", rlBase.Add(1*time.Second)))
+	require.True(t, q.allowAt("10.9.0.1", rlBase.Add(2*time.Second)), "ip1 touched again: its recency moves to the front")
 
-	// A third IP hits the cap. The truly oldest IP (10.9.0.2, seen at +5s)
-	// must be evicted, not 10.9.0.1 whose heap key still says +0s.
-	require.True(t, q.allowAt("10.9.0.3", rlBase.Add(12*time.Second)))
+	// A third IP hits the cap. The least recently seen IP (10.9.0.2, seen at
+	// +1s) must be evicted, not 10.9.0.1 last seen at +2s.
+	require.True(t, q.allowAt("10.9.0.3", rlBase.Add(3*time.Second)))
 	require.Contains(t, q.windows, "10.9.0.1")
 	require.Contains(t, q.windows, "10.9.0.3")
 	require.NotContains(t, q.windows, "10.9.0.2")
+}
+
+func TestRateLimiter_LRUOrderAcrossTouchedIPs(t *testing.T) {
+	// With multiple IPs touched after insertion, eviction must pick the true
+	// least-recently-seen entry, not insertion order: here insertion order
+	// would evict 10.10.0.1, but its touch at +3s makes 10.10.0.2 the LRU.
+	q := newQueryRateLimiter(10, 1000, 3)
+	defer q.Close()
+
+	require.True(t, q.allowAt("10.10.0.1", rlBase))                    // seen t0
+	require.True(t, q.allowAt("10.10.0.2", rlBase.Add(1*time.Second))) // seen t1
+	require.True(t, q.allowAt("10.10.0.2", rlBase.Add(2*time.Second))) // touched t2
+	require.True(t, q.allowAt("10.10.0.1", rlBase.Add(3*time.Second))) // touched t3
+	require.True(t, q.allowAt("10.10.0.3", rlBase.Add(4*time.Second))) // seen t4, fills the cap
+
+	// Cap hit: 10.10.0.2 (t2) is the least recently seen and must go.
+	require.True(t, q.allowAt("10.10.0.4", rlBase.Add(5*time.Second)))
+	require.Contains(t, q.windows, "10.10.0.1")
+	require.Contains(t, q.windows, "10.10.0.3")
+	require.Contains(t, q.windows, "10.10.0.4")
+	require.NotContains(t, q.windows, "10.10.0.2")
 }
 
 func TestQuery_RateLimited_Response(t *testing.T) {

@@ -409,14 +409,14 @@ func TestQuery_LexiconValues(t *testing.T) {
 // and declare params/output consistent with the handlers' actual output.
 func TestQuery_Lexicons(t *testing.T) {
 	type schemaNode struct {
-		Type       string                 `json:"type"`
-		Required   []string               `json:"required"`
-		Properties map[string]schemaNode  `json:"properties"`
-		Items      *schemaNode            `json:"items"`
-		Ref        string                 `json:"ref"`
-		Default    *int                   `json:"default"`
-		Minimum    *int                   `json:"minimum"`
-		Maximum    *int                   `json:"maximum"`
+		Type        string                `json:"type"`
+		Required    []string              `json:"required"`
+		Properties  map[string]schemaNode `json:"properties"`
+		Items       *schemaNode           `json:"items"`
+		Ref         string                `json:"ref"`
+		Default     *int                  `json:"default"`
+		Minimum     *int                  `json:"minimum"`
+		Maximum     *int                  `json:"maximum"`
 		KnownValues []string              `json:"knownValues"`
 	}
 	type paramNode struct {
@@ -438,8 +438,8 @@ func TestQuery_Lexicons(t *testing.T) {
 		data, err := os.ReadFile(path)
 		require.NoError(t, err, path)
 		var top struct {
-			Lexicon int                       `json:"lexicon"`
-			ID      string                    `json:"id"`
+			Lexicon int                        `json:"lexicon"`
+			ID      string                     `json:"id"`
 			Defs    map[string]json.RawMessage `json:"defs"`
 		}
 		require.NoError(t, json.Unmarshal(data, &top), path)

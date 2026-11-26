@@ -30,8 +30,8 @@ type Config struct {
 	UpstreamRateLimit       RateLimit
 	// QueryRateLimit bounds public per-client-IP query endpoint requests
 	// (two-tier sliding window: per-second and per-hour).
-	QueryRateLimit          RateLimit
-	SubscriberBufSize       int
+	QueryRateLimit    RateLimit
+	SubscriberBufSize int
 }
 
 // Load reads configuration from environment variables and validates it.

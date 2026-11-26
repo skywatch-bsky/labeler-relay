@@ -15,7 +15,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
   - XRPC frames follow header+body CBOR concatenation (op:1 for messages, op:-1 for errors)
   - Query responses are JSON projections limited to did, endpoint, source, enabled, last_upstream_seq (omitted when null); last_error, require_sig, and updated_at never appear
   - Query pagination is keyset over the DID-ordered list (cursor = last did of the previous page); limit outside 1-100 and nonempty enabled values other than true/false are rejected with 400, not clamped; absent or empty enabled applies no filter
-  - The query rate limiter keys on the connection peer address (RemoteAddr), never X-Forwarded-For, and bounds its tracked-IP map at 65536 entries with heap-ordered idle/oldest eviction (O(log n) admission at cap)
+  - The query rate limiter keys on the connection peer address (RemoteAddr), never X-Forwarded-For, and bounds its tracked-IP map at 65536 entries with O(1) LRU eviction (the evicted entry is an idle one whenever any entry is idle)
 - **Expects**: Hub.Broadcast wired as LabelPersist's broadcaster. Persist provides valid playback and head/floor. Registry provides DID-ordered lists.
 
 ## Dependencies
@@ -28,7 +28,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - Per-subscriber buffer (default 512, configurable via LABELER_RELAY_SUBSCRIBER_BUF_SIZE): bounds memory per consumer. Overflow triggers drop, not backpressure.
 - Write timeout (5s): prevents a stalled client from blocking the handler goroutine.
 - Query pagination and the enabled filter happen in the handler over one registry List call (no new store methods): fine at registry scale (hundreds of rows) and consistent with /_health.
-- Query rate limiter reuses the slurper's two-tier sliding window pattern (per-second + per-hour) with an AllowN now-seam so tests drive windows without sleeping. Local-window StopFuncs are no-ops; Close exists for hygiene if the window implementation changes.
+- Query rate limiter reuses the slurper's two-tier sliding window pattern (per-second + per-hour) with an AllowN now-seam so tests drive windows without sleeping. Recency is maintained incrementally (O(1) move-to-front per request; eviction takes the list tail), so capped admission never scans the tracked set. Local-window StopFuncs are no-ops; Close exists for hygiene if the window implementation changes.
 
 ## Invariants
 - StreamFrom's dedup boundary relies on relay_seq monotonicity: if persist ever minted non-monotonic seqs, dedup would break
