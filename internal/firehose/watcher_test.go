@@ -303,7 +303,6 @@ func TestWatcherCursorDialIncludesQuery(t *testing.T) {
 	w, _, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
 	ctx := context.Background()
 
-	// Persist a cursor value.
 	if err := w.store.SetMeta(ctx, "firehose_cursor", "999"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
@@ -321,7 +320,6 @@ func TestWatcherCursorDialIncludesQuery(t *testing.T) {
 		u.RawQuery = q.Encode()
 	}
 
-	// Assert the URL now contains cursor=999.
 	if !strings.Contains(u.String(), "cursor=999") {
 		t.Errorf("dial URL does not contain cursor=999: %s", u.String())
 	}
@@ -391,7 +389,6 @@ func TestWatcherLastErrorFreshInsert(t *testing.T) {
 	w, _, _ := newWatcherForTest(t, &fakeDIDResolver{})
 	ctx := context.Background()
 
-	// Drive an error on a labeler not yet in the registry.
 	if err := w.registry.RecordError(ctx, did, "test error message"); err != nil {
 		t.Fatalf("RecordError: %v", err)
 	}

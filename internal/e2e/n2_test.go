@@ -57,13 +57,11 @@ func TestN2LiveAggregation(t *testing.T) {
 	require.NoError(t, err, "failed to resolve #atproto_label key for ozone.skywatch.blue (%s) — is the network reachable?", didSkywatch)
 	t.Logf("resolved key for ozone.skywatch.blue (%s): %s", didSkywatch, skywatchKey.Multibase())
 
-	// Map DID → public key for O(1) lookup during assertions.
 	keyBySrc := map[string]atcrypto.PublicKey{
 		didMod:      modKey,
 		didSkywatch: skywatchKey,
 	}
 
-	// Step 2: Boot the relay and register both labelers.
 	t.Log("booting relay harness...")
 	h, err := e2e.NewHarness(t)
 	require.NoError(t, err, "failed to boot relay harness")
@@ -88,9 +86,7 @@ func TestN2LiveAggregation(t *testing.T) {
 		countBySrc(collected, didSkywatch),
 	)
 
-	// Step 4a — AC1.1/AC1.2/AC11.1: every collected label verifies cryptographically
-	// against the key of the labeler identified by its Src field.
-	// Verification passing IS the AC1.3 proof: any lossy re-encode breaks the sig.
+	// Signature verification proves the relay preserved the label's signed fields; a lossy re-encode of signed content would fail this check.
 	t.Log("verifying cryptographic signatures...")
 	modVerified := 0
 	skywatchVerified := 0
@@ -117,9 +113,7 @@ func TestN2LiveAggregation(t *testing.T) {
 	t.Logf("AC1.1/AC1.2/AC1.3: %d labels verified from mod.bsky.app, %d from ozone.skywatch.blue",
 		modVerified, skywatchVerified)
 
-	// Step 4b — AC1.4/AC11.2: provenance is uncontaminated across both origins.
-	// The frame-level OutputSrc and the label's own Src must be identical and one
-	// of the two expected DIDs. No cross-contamination, no relay-identity rewrite.
+	// The frame-level OutputSrc must match the label's Src and one of the two origin DIDs.
 	t.Log("checking provenance integrity (AC1.4/AC11.2)...")
 	for i, cl := range collected {
 		if cl.OutputSrc != cl.Label.Src {
@@ -158,10 +152,8 @@ func TestN2LiveAggregation(t *testing.T) {
 			t.Fatalf("backfill: failed to collect %d labels with cursor=%d: %v", backfillK, cursor, err)
 		}
 
-		// Assert ascending relay_seq with no duplicates.
 		assertMonotonicSeqs(t, backfill)
 
-		// Assert all backfill seqs are > cursor.
 		for i, cl := range backfill {
 			if cl.RelaySeq <= cursor {
 				t.Fatalf("backfill: label[%d] relay_seq=%d is not > cursor=%d", i, cl.RelaySeq, cursor)
@@ -183,8 +175,6 @@ func TestN2LiveAggregation(t *testing.T) {
 	anyCtx, anyCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer anyCancel()
 
-	// Collect at least 1 frame of any type; the harness has already seen labels
-	// so there will be stored frames to replay.
 	frames, err := h.CollectAny(anyCtx, 1)
 	require.NoError(t, err, "union decode check: CollectAny failed")
 	t.Logf("union decode check: decoded %d frames without error (all frame types consumable)", len(frames))

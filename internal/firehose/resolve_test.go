@@ -75,10 +75,7 @@ func TestLabelerEndpointError(t *testing.T) {
 	}
 }
 
-// TestIndigoResolverWrapperfails with error if identity.Resolver is not available at test time.
-// This test documents the wrapper but doesn't require integration testing.
 func TestIndigoResolverWrapperType(t *testing.T) {
-	// Verify that indigoResolver implements DIDResolver.
 	var _ DIDResolver = (*indigoResolver)(nil)
 }
 

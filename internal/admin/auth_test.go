@@ -18,7 +18,6 @@ func TestRequireBearer(t *testing.T) {
 		w.Write([]byte("next"))
 	})
 
-	// Middleware wrapped handler.
 	mw := RequireBearer(testToken, nextHandler)
 
 	t.Run("no Authorization header returns 401", func(t *testing.T) {

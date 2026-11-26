@@ -41,13 +41,11 @@ func main() {
 func run(ctx context.Context) error {
 	log := slog.Default()
 
-	// Step 1: Load config from environment.
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to start: %w", err)
 	}
 
-	// Step 2: Open the SQLite store (single store backing both persist and registry).
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("failed to open store: %w", err)
@@ -57,7 +55,6 @@ func run(ctx context.Context) error {
 	persist := store.NewLabelPersist(st)
 	registry := store.NewLabelerRegistry(st)
 
-	// Step 3: Build the metrics registry and register all metrics.
 	reg := prometheus.NewRegistry()
 	if err := metrics.Register(reg); err != nil {
 		return fmt.Errorf("failed to register metrics: %w", err)
@@ -68,11 +65,9 @@ func run(ctx context.Context) error {
 		metrics.HeadSeq.Set(seq)
 	})
 
-	// Step 4: Build the Hub and register it as the broadcaster.
 	hub := server.NewHub()
 	persist.SetBroadcaster(hub.Broadcast)
 
-	// Step 5: Build the slurper and wire upstreams gauge and throttled counter.
 	sl := slurper.New(
 		registry,
 		persist,
@@ -96,7 +91,7 @@ func run(ctx context.Context) error {
 		metrics.IngestedTotal.WithLabelValues(did).Add(float64(n))
 	})
 
-	// Step 6: Build the firehose watcher. identity.BaseDirectory{} is the zero
+	// identity.BaseDirectory{} is the zero
 	// value and is directly usable as a Resolver (live HTTP DID resolution).
 	baseDir := &identity.BaseDirectory{}
 	resolver := firehose.NewIndigoResolver(baseDir)
@@ -111,10 +106,8 @@ func run(ctx context.Context) error {
 		log,
 	)
 
-	// Step 7: Build the admin API.
 	adminAPI := admin.NewAPI(registry, resolver, sl.Poke, cfg.AdminToken)
 
-	// Step 8: Build the HTTP server and wire consumer count callbacks.
 	retentionSecs := int64(cfg.RetentionWindow / time.Second)
 	srv := server.NewServer(hub, persist, registry, log, retentionSecs, cfg.SubscriberBufSize)
 	srv.SetConnectCallback(func() {
@@ -129,7 +122,6 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("/_health", srv.HandleHealth)
 	mux.Handle("/metrics", server.MetricsHandler(reg))
 
-	// Mount admin routes.
 	mux.Handle("/admin/", adminAPI.Routes())
 
 	httpServer := &http.Server{
@@ -142,7 +134,6 @@ func run(ctx context.Context) error {
 		IdleTimeout:       2 * time.Minute,
 	}
 
-	// Step 9: Build the prune job and wire retention-floor gauge.
 	pruneJob := store.NewPruneJob(
 		persist,
 		cfg.RetentionWindow,
@@ -154,7 +145,6 @@ func run(ctx context.Context) error {
 		metrics.RetentionFloorGauge.Set(floor)
 	})
 
-	// Step 10: Start all background goroutines under an errgroup.
 	g, gctx := errgroup.WithContext(ctx)
 
 	// HTTP server lifecycle: start in background, shut down gracefully on
@@ -175,7 +165,6 @@ func run(ctx context.Context) error {
 		return httpServer.Shutdown(shutCtx)
 	})
 
-	// Slurper: reconcile loop.
 	g.Go(func() error {
 		if err := sl.Run(gctx); err != nil && err != context.Canceled {
 			return fmt.Errorf("slurper: %w", err)

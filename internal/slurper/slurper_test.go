@@ -74,7 +74,6 @@ func TestSlurperStartsSubscriptionsForEnabledLabelers(t *testing.T) {
 		t.Fatalf("Reconcile failed: %v", err)
 	}
 
-	// Wait for WebSockets to be ready.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -90,7 +89,6 @@ func TestSlurperStartsSubscriptionsForEnabledLabelers(t *testing.T) {
 		t.Fatalf("timeout waiting for labelerB websocket ready")
 	}
 
-	// Send a frame from labelerA.
 	frameA := &atproto.LabelSubscribeLabels_Labels{
 		Labels: []*atproto.LabelDefs_Label{
 			{
@@ -107,7 +105,6 @@ func TestSlurperStartsSubscriptionsForEnabledLabelers(t *testing.T) {
 		t.Fatalf("failed to send frameA: %v", err)
 	}
 
-	// Send a frame from labelerB.
 	frameB := &atproto.LabelSubscribeLabels_Labels{
 		Labels: []*atproto.LabelDefs_Label{
 			{
@@ -124,7 +121,6 @@ func TestSlurperStartsSubscriptionsForEnabledLabelers(t *testing.T) {
 		t.Fatalf("failed to send frameB: %v", err)
 	}
 
-	// Wait for both labels to be persisted.
 	head, err := waitForCondition(ctx, func() (int64, error) {
 		return persist.Head(context.Background())
 	}, 2)

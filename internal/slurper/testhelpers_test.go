@@ -30,7 +30,6 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 		emitErrs: make(chan error, 10),
 	}
 
-	// HTTP server with WebSocket handler.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/xrpc/com.atproto.label.subscribeLabels", func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{}
@@ -52,7 +51,6 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 			close(wsReady)
 		}
 
-		// Keep the connection open until it's closed.
 		// Read loop to detect client disconnect.
 		for {
 			_, _, err := ws.ReadMessage()
@@ -66,7 +64,6 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 	})
 	fls.server = httptest.NewServer(mux)
 
-	// Helper to send frames.
 	fls.sendFrame = func(frame *atproto.LabelSubscribeLabels_Labels) error {
 		fls.mu.Lock()
 		defer fls.mu.Unlock()
@@ -89,7 +86,6 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 			return fmt.Errorf("failed to marshal label frame: %w", err)
 		}
 
-		// Send as binary message.
 		return fls.wsConn.WriteMessage(websocket.BinaryMessage, buf.Bytes())
 	}
 

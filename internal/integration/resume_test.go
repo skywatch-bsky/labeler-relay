@@ -29,7 +29,6 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-// ---- fake subscribeLabels server (mirrors slurper/testhelpers_test.go) ----
 
 type fakeLabelerServer struct {
 	server      *httptest.Server
@@ -140,7 +139,6 @@ func (fls *fakeLabelerServer) Close() {
 	fls.server.Close()
 }
 
-// ---- fake subscribeRepos server (firehose watcher) ----
 //
 // On each connection it records the cursor query param, then sends a minimal
 // #commit frame (no ops) so the watcher advances and persists its cursor.
@@ -275,7 +273,6 @@ func (fs *fakeSubscribeReposServer) Close() {
 	fs.server.Close()
 }
 
-// ---- helpers ----
 
 func discardLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -311,7 +308,6 @@ func (f *fakeDIDResolver) LabelerEndpoint(_ context.Context, _ string) (string, 
 	return f.endpoint, nil
 }
 
-// ---- tests ----
 
 // TestResumeSlurper verifies AC10.1: after a slurper is stopped, a new slurper
 // over the same store dials the upstream with ?cursor=<persisted_seq>.
@@ -339,7 +335,6 @@ func TestResumeSlurper(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// --- Phase 1: run slurper, ingest up to upstream_seq=42 ---
 
 	slurper1 := slurper.New(
 		registry, persist,
@@ -355,7 +350,6 @@ func TestResumeSlurper(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	// Wait for first connection.
 	waitForCond(t, 5000, func() bool {
 		select {
 		case <-fakeServer.wsReadyCh():
@@ -371,7 +365,6 @@ func TestResumeSlurper(t *testing.T) {
 	default:
 	}
 
-	// Send one label at seq=42.
 	if err := fakeServer.sendFrame(&atproto.LabelSubscribeLabels_Labels{
 		Seq: firstSeq,
 		Labels: []*atproto.LabelDefs_Label{
@@ -393,7 +386,6 @@ func TestResumeSlurper(t *testing.T) {
 		return err == nil && c != nil && *c == firstSeq
 	}, fmt.Sprintf("cursor persisted at %d", firstSeq))
 
-	// Simulate crash: cancel + shutdown.
 	cancel1()
 	slurper1.Shutdown()
 
@@ -401,7 +393,6 @@ func TestResumeSlurper(t *testing.T) {
 	fakeServer.resetForNextDial()
 	prevDialCount := fakeServer.dialCount()
 
-	// --- Phase 2: new slurper over same store, same registry ---
 
 	slurper2 := slurper.New(
 		registry, persist,
@@ -419,7 +410,6 @@ func TestResumeSlurper(t *testing.T) {
 	}
 	go func() { _ = slurper2.Run(ctx2) }()
 
-	// Wait for new connection.
 	waitForCond(t, 8000, func() bool {
 		select {
 		case <-fakeServer.wsReadyCh():

@@ -72,7 +72,6 @@ func New(
 // cancels subscriptions for labelers that are no longer enabled.
 // Reconcile is idempotent: calling twice with no registry change is a no-op.
 func (s *LabelSlurper) Reconcile(ctx context.Context) error {
-	// Fetch enabled labelers from registry.
 	enabled, err := s.registry.ListEnabled(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list enabled labelers: %w", err)
@@ -81,7 +80,6 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Build a set of enabled DIDs for efficient lookup.
 	enabledSet := make(map[string]struct{})
 	for _, labeler := range enabled {
 		enabledSet[labeler.DID] = struct{}{}
@@ -104,10 +102,8 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 			"new_endpoint", labeler.Endpoint)
 	}
 
-	// Start subscriptions for newly enabled labelers.
 	for _, labeler := range enabled {
 		if _, exists := s.active[labeler.DID]; !exists {
-			// New labeler: start a subscription.
 			subCtx, subCancel := context.WithCancel(s.ctx)
 
 			limiter := NewLimiter(s.limits.PerSec, s.limits.PerHour)
@@ -135,7 +131,6 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 			}
 			s.active[labeler.DID] = sc
 
-			// Run the subscription in a background goroutine.
 			s.wg.Add(1)
 			go func(sc *subscriptionContext) {
 				defer s.wg.Done()
@@ -161,7 +156,6 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 		}
 	}
 
-	// Notify observer of updated upstream count (e.g. Prometheus gauge).
 	if s.onUpstreamsReconciled != nil {
 		s.onUpstreamsReconciled(float64(len(s.active)))
 	}

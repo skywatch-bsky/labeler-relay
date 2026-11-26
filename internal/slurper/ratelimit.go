@@ -23,7 +23,6 @@ type Limiter struct {
 // NewLimiter creates a new rate limiter with the given per-second and per-hour
 // token budgets.
 func NewLimiter(perSec, perHour int) *Limiter {
-	// Create a wrapper function that matches the NewWindow signature
 	newWindow := func() (slidingwindow.Window, slidingwindow.StopFunc) {
 		return slidingwindow.NewLocalWindow()
 	}
@@ -77,7 +76,6 @@ func (l *Limiter) Wait(ctx context.Context) error {
 			return nil
 		}
 
-		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -94,10 +92,8 @@ func (l *Limiter) Wait(ctx context.Context) error {
 			}
 		}
 
-		// Short backoff before retry
 		select {
 		case <-time.After(10 * time.Millisecond):
-			// Retry
 		case <-ctx.Done():
 			return ctx.Err()
 		}

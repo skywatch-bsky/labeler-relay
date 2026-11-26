@@ -22,7 +22,6 @@ func TestHarnessBootAndHealth(t *testing.T) {
 
 	healthURL := "http://" + h.Addr() + "/_health"
 
-	// Condition-based wait: poll /_health until 200 or timeout.
 	deadline := time.Now().Add(5 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {

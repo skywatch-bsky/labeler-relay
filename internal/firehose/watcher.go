@@ -127,7 +127,6 @@ func (w *FirehoseWatcher) dial(ctx context.Context) error {
 	w.commitCount = 0
 	w.lastFlushTime = time.Now()
 
-	// Build the subscription URL.
 	u, err := url.Parse(w.url)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -143,7 +142,6 @@ func (w *FirehoseWatcher) dial(ctx context.Context) error {
 		// Continue without cursor on error; next dial will attempt again.
 	}
 
-	// Dial the WebSocket.
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
@@ -166,11 +164,9 @@ func (w *FirehoseWatcher) dial(ctx context.Context) error {
 		}
 	}()
 
-	// Build the scheduler to handle events.
 	sched := sequential.NewScheduler("firehose", w.handleEvent)
 	defer sched.Shutdown()
 
-	// Consume the firehose.
 	return stream.HandleRepoStream(ctx, conn, sched, w.log)
 }
 
@@ -189,7 +185,6 @@ func (w *FirehoseWatcher) handleEvent(ctx context.Context, evt *stream.XRPCStrea
 
 // handleCommit processes a commit event from the firehose.
 func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) error {
-	// Extract labeler.service ops from the commit.
 	ops, err := ExtractLabelerServiceOps(ctx, commit)
 	if err != nil {
 		w.log.Error("extract failed", "err", err)
@@ -197,12 +192,10 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 		return nil
 	}
 
-	// Process each labeler op.
 	for _, op := range ops {
 		w.log.Debug("labeler op", "did", op.RepoDID, "action", op.Action, "rkey", op.Rkey)
 
 		if op.Action == "create" || op.Action == "update" {
-			// Resolve the endpoint.
 			endpoint, err := w.resolver.LabelerEndpoint(ctx, op.RepoDID)
 			if err != nil {
 				if err == ErrNoLabelerEndpoint {
@@ -233,7 +226,6 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				continue
 			}
 
-			// Persist the #service event.
 			_, err = w.persist.PersistIngest(ctx, store.IngestEvent{
 				Kind:       "service",
 				LabelerDID: op.RepoDID,
@@ -245,7 +237,6 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				continue
 			}
 
-			// Notify the slurper to reconcile.
 			w.poke()
 		} else if op.Action == "delete" {
 			// Delete ops: only disable firehose-sourced labelers, never manual.

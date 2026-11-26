@@ -50,8 +50,7 @@ func StreamFrom(ctx context.Context, p *store.LabelPersist, hub *Hub, since int6
 
 		cursor := since
 
-		// Phase 1: Chunked backfill. A background goroutine drains the live
-		// channel to prevent the Hub from dropping us while we read from the DB.
+		// Drain live events during backfill to prevent the Hub from dropping us.
 		drainDone := make(chan struct{})
 		stopDrain := make(chan struct{})
 		go func() {

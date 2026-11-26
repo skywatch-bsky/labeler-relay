@@ -21,7 +21,6 @@ import (
 func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 	t.Parallel()
 
-	// Setup: fake server, test store, metrics.
 	fakeServer := newFakeLabelerServer(t)
 	defer fakeServer.Close()
 
@@ -39,7 +38,6 @@ func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 	registry := store.NewLabelerRegistry(testStore)
 	persist := store.NewLabelPersist(testStore)
 
-	// Insert test labeler.
 	labeler := store.Labeler{
 		DID:      "did:plc:test123",
 		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
@@ -51,7 +49,6 @@ func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 		t.Fatalf("failed to insert labeler: %v", err)
 	}
 
-	// Create subscription and run it in background.
 	sub := &subscription{
 		labeler:    labeler,
 		persist:    persist,
@@ -68,14 +65,12 @@ func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 		_ = sub.run(ctx)
 	}()
 
-	// Wait for WebSocket to be ready.
 	select {
 	case <-fakeServer.wsReady:
 	case <-ctx.Done():
 		t.Fatalf("timeout waiting for websocket ready")
 	}
 
-	// Send a signed label frame via the fake server.
 	frame := &atproto.LabelSubscribeLabels_Labels{
 		Labels: []*atproto.LabelDefs_Label{
 			{
@@ -93,7 +88,6 @@ func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 		t.Fatalf("failed to send frame: %v", err)
 	}
 
-	// Wait for the label to be persisted.
 	head, err := waitForCondition(ctx, func() (int64, error) {
 		return persist.Head(context.Background())
 	}, 1)
@@ -737,7 +731,6 @@ func TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride(t *testing.
 		t.Fatalf("failed to send frame: %v", err)
 	}
 
-	// Wait for the label to be persisted.
 	head, err := waitForCondition(ctx, func() (int64, error) {
 		return persist.Head(context.Background())
 	}, 1)

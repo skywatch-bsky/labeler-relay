@@ -32,7 +32,6 @@ func buildLabelerServiceCAR(t *testing.T, did, rkey string, svc *bsky.LabelerSer
 	// dag-cbor + sha2-256 is the codec indigo uses for repo blocks.
 	prefix := cid.NewPrefixV1(cid.DagCBOR, multihash.SHA2_256)
 
-	// 1. Encode the record and compute its real content CID.
 	var recBuf bytes.Buffer
 	if err := svc.MarshalCBOR(&recBuf); err != nil {
 		t.Fatalf("marshal labeler service: %v", err)
@@ -46,7 +45,6 @@ func buildLabelerServiceCAR(t *testing.T, did, rkey string, svc *bsky.LabelerSer
 		t.Fatalf("record block: %v", err)
 	}
 
-	// 2. Build the MST referencing the record by its CID, flush nodes to a store.
 	bs := blockstore.NewBlockstore(datastore.NewMapDatastore())
 	if err := bs.Put(ctx, recBlock); err != nil {
 		t.Fatalf("put record block: %v", err)
@@ -61,7 +59,6 @@ func buildLabelerServiceCAR(t *testing.T, did, rkey string, svc *bsky.LabelerSer
 		t.Fatalf("write mst blocks: %v", err)
 	}
 
-	// 3. Build and sign a v3 commit pointing at the MST root.
 	priv, err := atcrypto.GeneratePrivateKeyP256()
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
@@ -92,7 +89,6 @@ func buildLabelerServiceCAR(t *testing.T, did, rkey string, svc *bsky.LabelerSer
 		t.Fatalf("put commit block: %v", err)
 	}
 
-	// 4. Serialize a CAR v1: header rooted at the commit, then every block.
 	//
 	// go-ipfs-blockstore keys by multihash only and reconstructs CIDs with the
 	// RAW codec (0x55) in AllKeysChan, which would write frames whose CIDs don't
