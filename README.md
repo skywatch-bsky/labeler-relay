@@ -112,7 +112,7 @@ All configuration uses environment variables with the `LABELER_RELAY_` prefix.
 Unset or empty optional variables use their defaults. Use `true` or `false` for boolean settings.
 Invalid boolean, integer, or duration values prevent startup. Slow consumers can lose their connection when their buffer fills.
 
-Retention is always enabled. An unset `LABELER_RELAY_RETENTION_WINDOW` uses the 14-day default, and a window of zero or less is rejected at startup; there is no keep-forever mode. Set a very large window, such as `9999d`, to retain events indefinitely.
+Retention is always enabled. An unset `LABELER_RELAY_RETENTION_WINDOW` uses the 14-day default, and a window of zero or less is rejected at startup; there is no keep-forever mode. Set a very large window, such as `9999d` (about 27 years), to retain events far longer than the default.
 
 ## Endpoints
 

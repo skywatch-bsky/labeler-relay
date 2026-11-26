@@ -86,7 +86,7 @@ func TestN2LiveAggregation(t *testing.T) {
 		countBySrc(collected, didSkywatch),
 	)
 
-	// Signature verification also proves byte-faithful passthrough: re-encoding a label would invalidate its signature.
+	// Signature verification proves the relay preserved the label's signed fields; a lossy re-encode of signed content would fail this check.
 	t.Log("verifying cryptographic signatures...")
 	modVerified := 0
 	skywatchVerified := 0
