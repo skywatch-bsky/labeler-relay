@@ -95,6 +95,35 @@ func TestResolveClientIP(t *testing.T) {
 			want:    "9.9.9.9",
 		},
 
+		{
+			name:    "walk continues past a trusted intermediate hop",
+			peer:    mustAddr(t, "127.0.0.1"),
+			xff:     []string{"9.9.9.9, 10.0.0.1"},
+			trusted: loopbackPlusPrivate,
+			want:    "9.9.9.9",
+		},
+		{
+			name:    "walk crosses a trusted hop on a separate header line",
+			peer:    mustAddr(t, "127.0.0.1"),
+			xff:     []string{"6.6.6.6, 9.9.9.9", "::ffff:10.0.0.1"},
+			trusted: loopbackPlusPrivate,
+			want:    "9.9.9.9",
+		},
+		{
+			name:    "malformed entry reached after a trusted hop falls back to peer",
+			peer:    mustAddr(t, "127.0.0.1"),
+			xff:     []string{"not-an-ip, 10.0.0.1"},
+			trusted: loopbackPlusPrivate,
+			want:    "127.0.0.1",
+		},
+		{
+			name:    "zoned entry reached after a trusted hop falls back to peer",
+			peer:    mustAddr(t, "127.0.0.1"),
+			xff:     []string{"fe80::1%eth0, 10.0.0.1"},
+			trusted: loopbackPlusPrivate,
+			want:    "127.0.0.1",
+		},
+
 		// Fallbacks all degrade to the peer.
 		{
 			name:    "absent header falls back to peer",

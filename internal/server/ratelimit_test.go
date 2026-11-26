@@ -266,6 +266,49 @@ func TestRateLimiter_UntrustedPeerIgnoresXFF(t *testing.T) {
 		"a different XFF value must not open a second budget for an untrusted peer")
 }
 
+// TestRateLimiter_MalformedPeerKeepsRawRemoteAddr pins the fallback contract
+// for unparseable peer addresses: when SplitHostPort or ParseAddr fail on
+// RemoteAddr, the whole raw string becomes the key and X-Forwarded-For is
+// never consulted, even with a trusted-proxy list configured.
+func TestRateLimiter_MalformedPeerKeepsRawRemoteAddr(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+	}{
+		{name: "bare IP without port", remoteAddr: "203.0.113.9"},
+		{name: "hostname instead of IP", remoteAddr: "proxy.example.invalid:443"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := newQueryRateLimiter(1, 1000, 4, loopbackTrusted)
+			defer q.Close()
+
+			handler := q.Middleware("getLabelers", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			request := func(xff string) *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = tc.remoteAddr
+				req.Header.Set("X-Forwarded-For", xff)
+				return req
+			}
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, request("9.9.9.9"))
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, request("8.8.8.8"))
+			require.Equal(t, http.StatusTooManyRequests, rec.Code,
+				"an unparseable peer must keep the raw RemoteAddr key: a different XFF value must not open a second budget")
+			require.Contains(t, q.windows, tc.remoteAddr,
+				"the bucket key must be the complete raw RemoteAddr string")
+		})
+	}
+}
+
 // TestRateLimiter_MappedSpellingSharesBucket checks bucket sharing across
 // IPv4-mapped spellings and mapped-peer trust matching.
 func TestRateLimiter_MappedSpellingSharesBucket(t *testing.T) {
