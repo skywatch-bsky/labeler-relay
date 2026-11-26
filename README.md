@@ -107,6 +107,8 @@ All configuration uses environment variables with the `LABELER_RELAY_` prefix.
 | `LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED` | `true` | Enable newly discovered labelers. |
 | `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC` | `500` | Positive integer limit per labeler, in labels per second. |
 | `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR` | `100000` | Positive integer limit per labeler, in labels per hour. |
+| `LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC` | `10` | Positive integer limit per client IP, in query requests per second. |
+| `LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR` | `1200` | Positive integer limit per client IP, in query requests per hour. |
 | `LABELER_RELAY_SUBSCRIBER_BUF_SIZE` | `512` | Event buffer per downstream subscriber. Integer from 1 through 65536. |
 
 Unset or empty optional variables use their defaults. Use `true` or `false` for boolean settings.
@@ -185,6 +187,89 @@ On an empty store, cursors at or below zero are accepted without an info message
 
 Error bodies contain `error` and `message`. The relay closes the connection after `InvalidRequest` for a malformed cursor or `FutureCursor` for a cursor above the head.
 It attempts to send `ConsumerTooSlow` before closing a consumer whose buffer overflows. Socket write failures can close the connection without an error frame.
+
+### Query labelers (XRPC)
+
+Two GET endpoints expose the registry read-only. No authentication is required. Requests are rate limited per client IP: 10 per second and 1200 per hour by default. Both limits are configurable (see the configuration table). Behind a reverse proxy that hides client addresses, all visitors share one limit bucket.
+
+**List labelers:**
+
+```bash
+curl --fail 'http://localhost:8080/xrpc/community.labeler.sync.getLabelers?limit=2'
+```
+
+Example response:
+
+```json
+{
+  "labelers": [
+    {
+      "did": "did:plc:ar7c4by46qjdydhdevvrndac",
+      "endpoint": "https://bsky.app/xrpc/com.atproto.label.subscribeLabels",
+      "source": "manual",
+      "enabled": true,
+      "last_upstream_seq": 35916330
+    },
+    {
+      "did": "did:plc:k2vjpxvpxbnfyjzkb66cg7ju",
+      "endpoint": "",
+      "source": "firehose",
+      "enabled": false
+    }
+  ],
+  "cursor": "did:plc:k2vjpxvpxbnfyjzkb66cg7ju"
+}
+```
+
+`labelers` lists registry entries in ascending DID order. `source` is `firehose` for discovered labelers or `manual` for entries added through the admin API.
+`endpoint` stays empty until discovery resolves the labeler's DID document. `last_upstream_seq` is the last sequence ingested from that labeler; it is absent for labelers that have never ingested.
+`cursor` is the `did` of the last labeler on the page. Pass it back to fetch the next page; a response without `cursor` is the last page.
+
+Parameters:
+
+- `limit` (optional, default `50`): integer from 1 through 100. Out-of-range or non-integer values return HTTP 400 `InvalidRequest`. Values are rejected, not clamped.
+- `cursor` (optional): the `did` of the last labeler on the previous page.
+- `enabled` (optional): `true` returns only enabled labelers, `false` only disabled ones. Omit it to receive all labelers.
+
+This loop walks every page:
+
+```bash
+cursor=""
+while :; do
+  resp=$(curl -s --fail "http://localhost:8080/xrpc/community.labeler.sync.getLabelers?limit=100${cursor:+&cursor=$cursor}")
+  jq -r '.labelers[].did' <<<"$resp"
+  cursor=$(jq -r '.cursor // empty' <<<"$resp")
+  [ -z "$cursor" ] && break
+done
+```
+
+**Look up one labeler:**
+
+```bash
+curl --fail 'http://localhost:8080/xrpc/community.labeler.sync.getLabeler?did=did:plc:ar7c4by46qjdydhdevvrndac'
+```
+
+Example response:
+
+```json
+{
+  "did": "did:plc:ar7c4by46qjdydhdevvrndac",
+  "endpoint": "https://bsky.app/xrpc/com.atproto.label.subscribeLabels",
+  "source": "manual",
+  "enabled": true,
+  "last_upstream_seq": 35916330
+}
+```
+
+The `did` parameter is required. A malformed or unknown DID returns HTTP 400 `InvalidRequest`.
+
+Error responses are JSON objects with `error` and `message`:
+
+- HTTP 400 `InvalidRequest`: a malformed parameter, such as an out-of-range `limit`, an `enabled` value other than `true` or `false`, or a missing, malformed, or unknown `did`.
+- HTTP 429 `RateLimitExceeded`: the per-client-IP limit is exhausted. A `Retry-After: 1` header is a retry hint; an exhausted hourly budget can outlast it.
+- HTTP 500 `InternalServerError`: a registry read failed on the server.
+
+GET is the expected method and HEAD is also accepted. Other methods receive HTTP 405 with an `Allow` header.
 
 ### Health check
 
@@ -303,7 +388,7 @@ It renders deleted service records as `record: null`. These are client output co
 ## Production deployment
 
 The relay serves unencrypted HTTP and WebSocket connections. Use a reverse proxy with TLS termination for HTTPS and `wss://` access.
-Restrict direct access to the relay port. The stream, health, and metrics endpoints do not require the admin token.
+Restrict direct access to the relay port. The stream, query, health, and metrics endpoints do not require the admin token.
 
 SQLite uses WAL mode automatically. Use persistent storage and run one relay process per database.
 Size storage and measure throughput for your workload. The default retention period is 14 days.
@@ -312,6 +397,8 @@ Size storage and measure throughput for your workload. The default retention per
 
 The subscription schema is [subscribeLabelers.json](lexicons/community/labeler/sync/subscribeLabelers.json).
 It defines the `community.labeler.sync.subscribeLabelers` message bodies and cursor parameter.
+The query schemas are [getLabelers.json](lexicons/community/labeler/sync/getLabelers.json) and [getLabeler.json](lexicons/community/labeler/sync/getLabeler.json).
+They define the parameters and response bodies of the query endpoints.
 
 ## License
 
