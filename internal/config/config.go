@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -32,6 +33,9 @@ type Config struct {
 	// (two-tier sliding window: per-second and per-hour).
 	QueryRateLimit    RateLimit
 	SubscriberBufSize int
+	// TrustedProxies lists proxy CIDRs allowed to set X-Forwarded-For for
+	// query rate-limit keys. Other peers key on their connection address.
+	TrustedProxies []netip.Prefix
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -87,6 +91,11 @@ func Load() (Config, error) {
 	}
 
 	cfg.QueryRateLimit.PerHour, err = parseIntEnv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR", "query_rate_limit.per_hour", 1200)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cfg.TrustedProxies, err = parseTrustedProxies("LABELER_RELAY_TRUSTED_PROXIES")
 	if err != nil {
 		return Config{}, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -162,6 +171,39 @@ func parseIntEnv(key, field string, fallback int) (int, error) {
 		return 0, fmt.Errorf("invalid %s %q: %w", field, v, err)
 	}
 	return n, nil
+}
+
+// parseTrustedProxies reads comma-separated CIDRs. Unset uses loopback
+// defaults; empty or "none" disables proxy trust. Invalid CIDRs and
+// IPv4-mapped IPv6 prefixes fail startup to avoid address-family mismatches.
+func parseTrustedProxies(key string) ([]netip.Prefix, error) {
+	raw, set := os.LookupEnv(key)
+	if !set {
+		return []netip.Prefix{
+			netip.MustParsePrefix("127.0.0.1/32"),
+			netip.MustParsePrefix("::1/128"),
+		}, nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "none" {
+		return nil, nil
+	}
+	var trusted []netip.Prefix
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted_proxies entry %q: %w", entry, err)
+		}
+		if prefix.Addr().Is4In6() {
+			return nil, fmt.Errorf("invalid trusted_proxies entry %q: trusted_proxies entries must not be IPv4-mapped IPv6; write the IPv4 CIDR directly", entry)
+		}
+		trusted = append(trusted, prefix)
+	}
+	return trusted, nil
 }
 
 // parseDuration parses a duration string, supporting Go's time.ParseDuration

@@ -117,7 +117,7 @@ func run(ctx context.Context) error {
 		metrics.ConsumerCount.Dec()
 	})
 
-	mux := buildMux(srv, cfg.QueryRateLimit.PerSec, cfg.QueryRateLimit.PerHour, reg, adminAPI)
+	mux := buildMux(srv, cfg.QueryRateLimit.PerSec, cfg.QueryRateLimit.PerHour, cfg.TrustedProxies, reg, adminAPI)
 
 	httpServer := &http.Server{
 		Addr:    cfg.ListenAddr,

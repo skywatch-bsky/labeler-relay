@@ -15,7 +15,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
   - XRPC frames follow header+body CBOR concatenation (op:1 for messages, op:-1 for errors)
   - Query responses are JSON projections limited to did, endpoint, source, enabled, last_upstream_seq (omitted when null); last_error, require_sig, and updated_at never appear
   - Query pagination is keyset over the DID-ordered list (cursor = last did of the previous page); limit outside 1-100 and nonempty enabled values other than true/false are rejected with 400, not clamped; absent or empty enabled applies no filter
-  - The query rate limiter keys on the connection peer address (RemoteAddr), never X-Forwarded-For, and bounds its tracked-IP map at 65536 entries with O(1) LRU eviction (the evicted entry is an idle one whenever any entry is idle)
+  - The query rate limiter keys on the connection peer address (RemoteAddr) unless the peer is inside the trusted proxy CIDRs (LABELER_RELAY_TRUSTED_PROXIES, loopback default): a trusted peer keys on the rightmost X-Forwarded-For hop outside the trusted set. An absent header, an all-trusted chain, or a malformed/zoned entry encountered during the walk falls back to the normalized peer; an unparseable RemoteAddr falls back to its raw string without consulting X-Forwarded-For. The tracked-IP map is bounded at 65536 entries with O(1) LRU eviction (the evicted entry is an idle one whenever any entry is idle)
 - **Expects**: Hub.Broadcast wired as LabelPersist's broadcaster. Persist provides valid playback and head/floor. Registry provides DID-ordered lists.
 
 ## Dependencies
@@ -29,6 +29,8 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - Write timeout (5s): prevents a stalled client from blocking the handler goroutine.
 - Query pagination and the enabled filter happen in the handler over one registry List call (no new store methods): fine at registry scale (hundreds of rows) and consistent with /_health.
 - Query rate limiter reuses the slurper's two-tier sliding window pattern (per-second + per-hour) with an AllowN now-seam so tests drive windows without sleeping. Recency is maintained incrementally (O(1) move-to-front per request; eviction takes the list tail), so capped admission never scans the tracked set. Local-window StopFuncs are no-ops; Close exists for hygiene if the window implementation changes.
+- Trusted-proxy keying (`clientip.go`): pure `resolveClientIP` walks X-Forwarded-For right to left across header lines and comma-separated entries, skipping trusted hops and stopping at the first untrusted address. Entries left of that address are not inspected. `Unmap().WithZone("")` normalizes peer addresses for trust checks and bucket keys; zoned XFF entries encountered during traversal are rejected rather than normalized. Config rejects IPv4-mapped IPv6 CIDRs to avoid address-family mismatches.
+- `NewQueryRateLimiter(perSec, perHour, trusted)` receives trust explicitly; nil/empty means trust nobody. Loopback defaults are supplied by config and passed through buildMux, not installed by the server package. Both query endpoints share one limiter and therefore share each client's budgets.
 
 ## Invariants
 - StreamFrom's dedup boundary relies on relay_seq monotonicity: if persist ever minted non-monotonic seqs, dedup would break
@@ -47,10 +49,12 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - `metrics_endpoint.go` - /metrics Prometheus handler
 - `query.go` - HandleGetLabelers/HandleGetLabeler: public projection, keyset pagination, writeXRPCError
 - `ratelimit.go` - QueryRateLimiter: per-IP two-tier sliding windows, Middleware, eviction
+- `clientip.go` - resolveClientIP: trusted-proxy-aware client-IP resolver for rate-limit keying
 
 ## Gotchas
 - `kindToMsgType` prepends "#" to the stored kind string. If a new kind is added, it must be handled here or it defaults to "#<kind>".
 - The WS upgrader accepts all origins (`CheckOrigin` returns true). Appropriate for a relay, but would need restricting for user-facing endpoints.
-- The query rate limiter keys on RemoteAddr. Behind a single reverse proxy all clients share one bucket; X-Forwarded-For is deliberately ignored because any client can set it.
+- X-Forwarded-For is honored only from trusted TCP peers. Configure only actual proxy ranges, and ensure those proxies append the observed upstream address or overwrite XFF with a verified chain; a trusted proxy that forwards an arbitrary client-supplied header unchanged permits spoofed bucket keys. Each intervening proxy must be trusted to recover the original client; otherwise the nearest untrusted hop is the key. Missing headers, fully trusted chains, and invalid entries encountered during traversal share the peer's bucket.
+- `clientip_test.go` covers trust boundaries, multi-line/multi-hop chains, fallbacks, and address normalization; `ratelimit_test.go` covers middleware keying, including malformed RemoteAddr. Route tests cover separate client budgets behind a trusted proxy.
 - Query error bodies use the XRPC shape `{"error", "message"}`, which differs from the admin package's single-key `{"error"}` shape. Do not unify them blindly; XRPC clients expect both keys.
 - Query responses are snake_case (`last_upstream_seq`) like /_health — a deliberate deviation from atproto's camelCase lexicon convention, matching the issue's field list. Stream frames remain camelCase.

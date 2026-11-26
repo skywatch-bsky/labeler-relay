@@ -10,6 +10,7 @@ import (
 	"container/list"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -50,22 +51,27 @@ type QueryRateLimiter struct {
 	// onRateLimited is called with the endpoint name when a request is
 	// rejected. May be nil.
 	onRateLimited func(endpoint string)
+	// trusted lists the proxy CIDRs whose peers may set X-Forwarded-For.
+	// Nil or empty means trust nobody: keying uses the connection peer only.
+	trusted []netip.Prefix
 }
 
-// NewQueryRateLimiter creates a limiter with the given per-second and
-// per-hour token budgets per client IP.
-func NewQueryRateLimiter(perSec, perHour int) *QueryRateLimiter {
-	return newQueryRateLimiter(perSec, perHour, maxTrackedIPs)
+// NewQueryRateLimiter creates a limiter with per-second and per-hour
+// budgets. trusted lists proxy CIDRs allowed to set X-Forwarded-For.
+// Other peers key on their connection address.
+func NewQueryRateLimiter(perSec, perHour int, trusted []netip.Prefix) *QueryRateLimiter {
+	return newQueryRateLimiter(perSec, perHour, maxTrackedIPs, trusted)
 }
 
 // newQueryRateLimiter is the test seam with an explicit map cap.
-func newQueryRateLimiter(perSec, perHour int, maxIPs int) *QueryRateLimiter {
+func newQueryRateLimiter(perSec, perHour int, maxIPs int, trusted []netip.Prefix) *QueryRateLimiter {
 	return &QueryRateLimiter{
 		order:   list.New(),
 		windows: make(map[string]*ipWindow),
 		perSec:  int64(perSec),
 		perHour: int64(perHour),
 		maxIPs:  maxIPs,
+		trusted: trusted,
 	}
 }
 
@@ -171,11 +177,12 @@ func (q *QueryRateLimiter) newIPWindow(ip string) *ipWindow {
 // rate-limited callback fires.
 func (q *QueryRateLimiter) Middleware(endpoint string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Key on the connection peer. X-Forwarded-For is deliberately
-		// ignored: any client can set it.
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
+		// Ignore X-Forwarded-For if RemoteAddr is not a parseable host:port.
+		ip := r.RemoteAddr
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			if peer, perr := netip.ParseAddr(host); perr == nil {
+				ip = resolveClientIP(peer, r.Header.Values("X-Forwarded-For"), q.trusted)
+			}
 		}
 
 		if !q.Allow(ip) {

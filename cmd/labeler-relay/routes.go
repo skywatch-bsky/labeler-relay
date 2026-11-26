@@ -7,6 +7,7 @@ package main
 
 import (
 	"net/http"
+	"net/netip"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -22,7 +23,7 @@ import (
 // The query endpoints use GET-qualified ServeMux patterns, so HEAD is also
 // served and any other method receives ServeMux's automatic 405 with an
 // Allow header.
-func buildMux(srv *server.Server, queryPerSec, queryPerHour int, reg *prometheus.Registry, adminAPI *admin.API) *http.ServeMux {
+func buildMux(srv *server.Server, queryPerSec, queryPerHour int, trustedProxies []netip.Prefix, reg *prometheus.Registry, adminAPI *admin.API) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/xrpc/community.labeler.sync.subscribeLabelers", srv.HandleSubscribeLabelers)
 	mux.HandleFunc("/_health", srv.HandleHealth)
@@ -30,7 +31,7 @@ func buildMux(srv *server.Server, queryPerSec, queryPerHour int, reg *prometheus
 
 	mux.Handle("/admin/", adminAPI.Routes())
 
-	ql := server.NewQueryRateLimiter(queryPerSec, queryPerHour)
+	ql := server.NewQueryRateLimiter(queryPerSec, queryPerHour, trustedProxies)
 	ql.SetRateLimitedCallback(func(endpoint string) {
 		metrics.QueryRateLimitedTotal.WithLabelValues(endpoint).Inc()
 	})

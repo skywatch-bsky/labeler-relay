@@ -10,17 +10,24 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
+// loopbackTrusted is the loopback trust set, mirroring the config default.
+var loopbackTrusted = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.1/32"),
+	netip.MustParsePrefix("::1/128"),
+}
+
 // rlBase is the fixed timestamp the limiter tests advance from.
 var rlBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func TestRateLimiter_AllowAndReject(t *testing.T) {
-	q := newQueryRateLimiter(2, 1000, 4)
+	q := newQueryRateLimiter(2, 1000, 4, nil)
 	defer q.Close()
 
 	require.True(t, q.allowAt("10.0.0.1", rlBase))
@@ -32,7 +39,7 @@ func TestRateLimiter_AllowAndReject(t *testing.T) {
 func TestRateLimiter_HourlyBudget(t *testing.T) {
 	// Generous per-second budget, tiny hourly budget: the rejection must
 	// come from the hourly tier only.
-	q := newQueryRateLimiter(100, 3, 4)
+	q := newQueryRateLimiter(100, 3, 4, nil)
 	defer q.Close()
 
 	for i := 0; i < 3; i++ {
@@ -43,7 +50,7 @@ func TestRateLimiter_HourlyBudget(t *testing.T) {
 }
 
 func TestRateLimiter_WindowRecovery(t *testing.T) {
-	q := newQueryRateLimiter(1, 1000, 4)
+	q := newQueryRateLimiter(1, 1000, 4, nil)
 	defer q.Close()
 
 	require.True(t, q.allowAt("10.0.0.3", rlBase))
@@ -54,7 +61,7 @@ func TestRateLimiter_WindowRecovery(t *testing.T) {
 }
 
 func TestRateLimiter_HourlyWindowRecovery(t *testing.T) {
-	q := newQueryRateLimiter(1000, 2, 4)
+	q := newQueryRateLimiter(1000, 2, 4, nil)
 	defer q.Close()
 
 	require.True(t, q.allowAt("10.0.0.4", rlBase))
@@ -67,7 +74,7 @@ func TestRateLimiter_HourlyWindowRecovery(t *testing.T) {
 }
 
 func TestRateLimiter_PerIPIsolation(t *testing.T) {
-	q := newQueryRateLimiter(1, 1000, 4)
+	q := newQueryRateLimiter(1, 1000, 4, nil)
 	defer q.Close()
 
 	require.True(t, q.allowAt("10.0.0.5", rlBase))
@@ -78,7 +85,7 @@ func TestRateLimiter_PerIPIsolation(t *testing.T) {
 func TestRateLimiter_CapEviction(t *testing.T) {
 	// Cap 4: filling the map and adding one more must evict the least
 	// recently seen entry, keeping the map bounded.
-	q := newQueryRateLimiter(10, 1000, 4)
+	q := newQueryRateLimiter(10, 1000, 4, nil)
 	defer q.Close()
 
 	for i := 0; i < 4; i++ {
@@ -92,7 +99,7 @@ func TestRateLimiter_CapEviction(t *testing.T) {
 }
 
 func TestRateLimiter_IdleEviction(t *testing.T) {
-	q := newQueryRateLimiter(10, 1000, 4)
+	q := newQueryRateLimiter(10, 1000, 4, nil)
 	defer q.Close()
 
 	for i := 0; i < 4; i++ {
@@ -113,7 +120,7 @@ func TestRateLimiter_TouchedIPNotEvicted(t *testing.T) {
 	// An IP touched after admission must not be evicted as "least recently
 	// seen": its recency moves to the front on every touch. This pins the
 	// LRU eviction order.
-	q := newQueryRateLimiter(10, 1000, 2)
+	q := newQueryRateLimiter(10, 1000, 2, nil)
 	defer q.Close()
 
 	require.True(t, q.allowAt("10.9.0.1", rlBase))
@@ -132,7 +139,7 @@ func TestRateLimiter_LRUOrderAcrossTouchedIPs(t *testing.T) {
 	// With multiple IPs touched after insertion, eviction must pick the true
 	// least-recently-seen entry, not insertion order: here insertion order
 	// would evict 10.10.0.1, but its touch at +3s makes 10.10.0.2 the LRU.
-	q := newQueryRateLimiter(10, 1000, 3)
+	q := newQueryRateLimiter(10, 1000, 3, nil)
 	defer q.Close()
 
 	require.True(t, q.allowAt("10.10.0.1", rlBase))                    // seen t0
@@ -150,7 +157,7 @@ func TestRateLimiter_LRUOrderAcrossTouchedIPs(t *testing.T) {
 }
 
 func TestQuery_RateLimited_Response(t *testing.T) {
-	q := newQueryRateLimiter(1, 1000, 4)
+	q := newQueryRateLimiter(1, 1000, 4, nil)
 	defer q.Close()
 
 	srv := httptest.NewServer(q.Middleware("getLabelers", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +187,7 @@ func TestQuery_RateLimited_Response(t *testing.T) {
 }
 
 func TestRateLimiter_CallbackFires(t *testing.T) {
-	q := newQueryRateLimiter(1, 1000, 4)
+	q := newQueryRateLimiter(1, 1000, 4, nil)
 	defer q.Close()
 
 	var got []string
@@ -200,4 +207,90 @@ func TestRateLimiter_CallbackFires(t *testing.T) {
 
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 	require.Equal(t, []string{"getLabeler"}, got, "rejected request must fire the callback with the endpoint name")
+}
+
+// TestRateLimiter_ProxyIsolation checks that clients behind a trusted proxy
+// have independent budgets.
+func TestRateLimiter_ProxyIsolation(t *testing.T) {
+	q := newQueryRateLimiter(1, 1000, 4, loopbackTrusted)
+	defer q.Close()
+
+	handler := q.Middleware("getLabelers", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := func(xff string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "127.0.0.1:55555"
+		req.Header.Set("X-Forwarded-For", xff)
+		return req
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, request("9.9.9.9"))
+	require.Equal(t, http.StatusOK, rec.Code, "9.9.9.9's first request must pass")
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, request("9.9.9.9"))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "9.9.9.9's second request must be rejected")
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, request("8.8.8.8"))
+	require.Equal(t, http.StatusOK, rec.Code, "8.8.8.8 must have an independent budget")
+}
+
+// TestRateLimiter_UntrustedPeerIgnoresXFF checks that an untrusted peer
+// cannot use X-Forwarded-For to open a second budget.
+func TestRateLimiter_UntrustedPeerIgnoresXFF(t *testing.T) {
+	q := newQueryRateLimiter(1, 1000, 4, nil)
+	defer q.Close()
+
+	handler := q.Middleware("getLabelers", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := func(xff string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "203.0.113.9:4444"
+		req.Header.Set("X-Forwarded-For", xff)
+		return req
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, request("9.9.9.9"))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, request("8.8.8.8"))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code,
+		"a different XFF value must not open a second budget for an untrusted peer")
+}
+
+// TestRateLimiter_MappedSpellingSharesBucket checks bucket sharing across
+// IPv4-mapped spellings and mapped-peer trust matching.
+func TestRateLimiter_MappedSpellingSharesBucket(t *testing.T) {
+	q := newQueryRateLimiter(1, 1000, 4, loopbackTrusted)
+	defer q.Close()
+
+	handler := q.Middleware("getLabelers", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := func(remoteAddr, xff string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("X-Forwarded-For", xff)
+		return req
+	}
+
+	// The mapped loopback peer is trusted, so the mapped non-trusted hop
+	// keys as its IPv4 form.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, request("[::ffff:127.0.0.1]:55555", "::ffff:1.2.3.4"))
+	require.Equal(t, http.StatusOK, rec.Code, "the mapped loopback peer must still be trusted")
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, request("127.0.0.1:55555", "1.2.3.4"))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code,
+		"::ffff:1.2.3.4 and 1.2.3.4 must share one bucket")
 }
