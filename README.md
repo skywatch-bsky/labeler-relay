@@ -401,6 +401,7 @@ The subscription schema is [subscribeLabelers.json](lexicons/community/labeler/s
 It defines the `community.labeler.sync.subscribeLabelers` message bodies and cursor parameter.
 The query schemas are [getLabelers.json](lexicons/community/labeler/sync/getLabelers.json) and [getLabeler.json](lexicons/community/labeler/sync/getLabeler.json).
 They define the parameters and response bodies of the query endpoints.
+The response object shared by both queries, `labelerView`, is defined once in [defs.json](lexicons/community/labeler/sync/defs.json).
 
 ## License
 

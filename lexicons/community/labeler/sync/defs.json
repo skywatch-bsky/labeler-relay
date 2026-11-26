@@ -1,0 +1,35 @@
+{
+  "lexicon": 1,
+  "id": "community.labeler.sync.defs",
+  "defs": {
+    "labelerView": {
+      "type": "object",
+      "description": "Public projection of a registry labeler row, shared by the getLabelers and getLabeler queries. Internal fields (last_error, require_sig, updated_at) are deliberately excluded.",
+      "required": ["did", "endpoint", "source", "enabled"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the labeler."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Labeler service endpoint URL. Stays empty until discovery resolves the endpoint for the labeler."
+        },
+        "source": {
+          "type": "string",
+          "knownValues": ["firehose", "manual"],
+          "description": "How the labeler was registered: discovered from the firehose, or added manually via the admin API."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the relay subscribes to this labeler's upstream stream."
+        },
+        "last_upstream_seq": {
+          "type": "integer",
+          "description": "Sequence number last ingested from the labeler's upstream stream. Absent when the labeler has never ingested."
+        }
+      }
+    }
+  }
+}

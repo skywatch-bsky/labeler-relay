@@ -202,11 +202,28 @@ func TestDocs_NewSurfaceDocumented(t *testing.T) {
 	require.Contains(t, text, "community.labeler.sync.getLabeler")
 
 	for _, path := range []string{
+		"../../lexicons/community/labeler/sync/defs.json",
 		"../../lexicons/community/labeler/sync/getLabelers.json",
 		"../../lexicons/community/labeler/sync/getLabeler.json",
 	} {
 		_, err := os.Stat(path)
 		require.NoError(t, err, path)
+	}
+
+	// labelerView is the shared response object: both query lexicons must
+	// reference the defs document, not carry or point at their own copy.
+	defs, err := os.ReadFile("../../lexicons/community/labeler/sync/defs.json")
+	require.NoError(t, err)
+	require.Contains(t, string(defs), `"id": "community.labeler.sync.defs"`)
+	require.Contains(t, string(defs), `"labelerView"`)
+	for _, path := range []string{
+		"../../lexicons/community/labeler/sync/getLabelers.json",
+		"../../lexicons/community/labeler/sync/getLabeler.json",
+	} {
+		body, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Contains(t, string(body), "community.labeler.sync.defs#labelerView", path)
+		require.NotContains(t, string(body), "community.labeler.sync.getLabelers#labelerView", path)
 	}
 }
 
