@@ -38,11 +38,17 @@ LABELER_RELAY_REQUIRE_SIG=true
 LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED=true
 LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC=500
 LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR=100000
+LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC=10
+LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR=1200
+LABELER_RELAY_TRUSTED_PROXIES=127.0.0.1/32,::1/128
+LABELER_RELAY_SUBSCRIBER_BUF_SIZE=512
 ```
 
 Defaults are shown. The only one without a default is `LABELER_RELAY_ADMIN_TOKEN`.
 
 `LABELER_RELAY_RETENTION_WINDOW` supports Go durations (`336h`) and day shorthand (`14d`).
+
+The query rate limits are per client IP and apply only to the public `getLabelers` and `getLabeler` endpoints. A client that exceeds them gets status 429 with the XRPC `RateLimitExceeded` error body.
 
 ## Running
 
@@ -105,6 +111,8 @@ server {
 
 The `proxy_read_timeout` and `proxy_send_timeout` must be long (24h+) because the WebSocket connections are long-lived.
 
+The query rate limiter keys on the connecting address, so every client behind a proxy shares one budget unless the proxy is trusted. Set `LABELER_RELAY_TRUSTED_PROXIES` to the proxy's CIDR ranges — the loopback default covers a same-host proxy like the Caddy example above — and a trusted proxy's `X-Forwarded-For` header then supplies the real client IP. Set the value to `none` to disable proxy trust and key strictly on the connecting address.
+
 ## Seeding labelers
 
 On a fresh deploy, the firehose watcher will auto-discover labelers as they create or update `app.bsky.labeler.service` records. This catches new labelers immediately but won't find existing ones that haven't changed recently.
@@ -149,6 +157,8 @@ Includes per-labeler ingest rates, dropped unsigned label counts, connected upst
 | Endpoint | Method | Auth | Purpose |
 |----------|--------|------|---------|
 | `/xrpc/community.labeler.sync.subscribeLabelers` | WS | No | Output stream (labels, service records, info frames) |
+| `/xrpc/community.labeler.sync.getLabelers` | GET | No | List registered labelers (paginated JSON, per-client-IP rate limited) |
+| `/xrpc/community.labeler.sync.getLabeler` | GET | No | One registered labeler by DID (JSON, per-client-IP rate limited) |
 | `/_health` | GET | No | Health check JSON |
 | `/metrics` | GET | No | Prometheus metrics |
 | `/admin/labelers` | POST | Bearer | Add a labeler by DID |

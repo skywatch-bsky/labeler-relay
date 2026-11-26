@@ -483,10 +483,15 @@ func TestQuery_Lexicons(t *testing.T) {
 	labelersProp, ok := listMain.Output.Schema.Properties["labelers"]
 	require.True(t, ok)
 	require.NotNil(t, labelersProp.Items)
-	require.Equal(t, "#labelerView", labelersProp.Items.Ref)
+	require.Equal(t, "community.labeler.sync.defs#labelerView", labelersProp.Items.Ref)
 
+	// The shared labelerView lives in the defs document, not in either
+	// query lexicon.
+	defsID, sharedDefs := readLexicon("../../lexicons/community/labeler/sync/defs.json")
+	require.Equal(t, "community.labeler.sync.defs", defsID)
+	require.NotContains(t, sharedDefs, "main", "the defs document carries only shared objects, not a query")
 	var view schemaNode
-	require.NoError(t, json.Unmarshal(defs["labelerView"], &view))
+	require.NoError(t, json.Unmarshal(sharedDefs["labelerView"], &view))
 	require.Equal(t, "object", view.Type)
 	require.ElementsMatch(t, []string{"did", "endpoint", "source", "enabled"}, view.Required,
 		"labelerView required fields must match the handler's always-emitted keys")
@@ -510,6 +515,6 @@ func TestQuery_Lexicons(t *testing.T) {
 
 	require.NotNil(t, singleMain.Output)
 	require.Equal(t,
-		"community.labeler.sync.getLabelers#labelerView",
+		"community.labeler.sync.defs#labelerView",
 		singleMain.Output.Schema.Ref)
 }

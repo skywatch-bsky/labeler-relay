@@ -109,10 +109,11 @@ All configuration uses environment variables with the `LABELER_RELAY_` prefix.
 | `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR` | `100000` | Positive integer limit per labeler, in labels per hour. |
 | `LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC` | `10` | Positive integer limit per client IP, in query requests per second. |
 | `LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR` | `1200` | Positive integer limit per client IP, in query requests per hour. |
+| `LABELER_RELAY_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | Comma-separated CIDR ranges for trusted proxies. The query rate limiter uses `X-Forwarded-For` only from these proxies. An empty value or `none` disables proxy trust. |
 | `LABELER_RELAY_SUBSCRIBER_BUF_SIZE` | `512` | Event buffer per downstream subscriber. Integer from 1 through 65536. |
 
-Unset or empty optional variables use their defaults. Use `true` or `false` for boolean settings.
-Invalid boolean, integer, or duration values prevent startup. Slow consumers can lose their connection when their buffer fills.
+Unset optional variables use their defaults. Empty values also use defaults, except for `LABELER_RELAY_TRUSTED_PROXIES`: an empty value disables proxy trust, as does `none`. Use `true` or `false` for boolean settings.
+Invalid boolean, integer, duration, or CIDR values prevent startup. Slow consumers can lose their connection when their buffer fills.
 
 Retention is always enabled. An unset `LABELER_RELAY_RETENTION_WINDOW` uses the 14-day default, and a window of zero or less is rejected at startup; there is no keep-forever mode. Set a very large window, such as `9999d` (about 27 years), to retain events far longer than the default.
 
@@ -190,7 +191,8 @@ It attempts to send `ConsumerTooSlow` before closing a consumer whose buffer ove
 
 ### Query labelers (XRPC)
 
-Two GET endpoints expose the registry read-only. No authentication is required. Requests are rate limited per client IP: 10 per second and 1200 per hour by default. Both limits are configurable (see the configuration table). Behind a reverse proxy that hides client addresses, all visitors share one limit bucket.
+Two GET endpoints expose the registry read-only. No authentication is required. Requests are rate limited per client IP: 10 per second and 1200 per hour by default. Both limits are configurable (see the configuration table).
+The rate limiter uses the connection peer IP and ignores `X-Forwarded-For` unless that peer matches `LABELER_RELAY_TRUSTED_PROXIES` (loopback by default). For trusted proxies, it reads `X-Forwarded-For` from right to left and uses the first IP outside the trusted ranges. If the header is missing, all entries are trusted, or the resolver encounters a malformed entry, it uses the proxy IP. These requests share one rate-limit bucket for that proxy.
 
 **List labelers:**
 
@@ -266,7 +268,7 @@ The `did` parameter is required. A malformed or unknown DID returns HTTP 400 `In
 Error responses are JSON objects with `error` and `message`:
 
 - HTTP 400 `InvalidRequest`: a malformed parameter, such as an out-of-range `limit`, an `enabled` value other than `true` or `false`, or a missing, malformed, or unknown `did`.
-- HTTP 429 `RateLimitExceeded`: the per-client-IP limit is exhausted. A `Retry-After: 1` header is a retry hint; an exhausted hourly budget can outlast it.
+- HTTP 429 `RateLimitExceeded`: the per-client-IP limit is exhausted. A `Retry-After: 1` header is a retry hint; an exhausted hourly budget can outlast it. For a reverse proxy, set `LABELER_RELAY_TRUSTED_PROXIES` to its CIDR ranges so the limiter can use client IPs from `X-Forwarded-For`. The default covers a same-host proxy, such as Caddy, that connects over loopback.
 - HTTP 500 `InternalServerError`: a registry read failed on the server.
 
 GET is the expected method and HEAD is also accepted. Other methods receive HTTP 405 with an `Allow` header.
@@ -399,6 +401,7 @@ The subscription schema is [subscribeLabelers.json](lexicons/community/labeler/s
 It defines the `community.labeler.sync.subscribeLabelers` message bodies and cursor parameter.
 The query schemas are [getLabelers.json](lexicons/community/labeler/sync/getLabelers.json) and [getLabeler.json](lexicons/community/labeler/sync/getLabeler.json).
 They define the parameters and response bodies of the query endpoints.
+The response object shared by both queries, `labelerView`, is defined once in [defs.json](lexicons/community/labeler/sync/defs.json).
 
 ## License
 

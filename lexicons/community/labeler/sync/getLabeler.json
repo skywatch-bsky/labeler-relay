@@ -20,7 +20,7 @@
         "encoding": "application/json",
         "schema": {
           "type": "ref",
-          "ref": "community.labeler.sync.getLabelers#labelerView"
+          "ref": "community.labeler.sync.defs#labelerView"
         }
       }
     }

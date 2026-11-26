@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -220,6 +222,75 @@ func TestConfig_QueryRateLimitInvalid(t *testing.T) {
 	})
 }
 
+// TestConfig_TrustedProxiesDefault checks the loopback default. The variable
+// must be genuinely unset here: clearEnv sets empty strings, and LookupEnv
+// treats those as set-but-empty (trust nobody), not unset.
+func TestConfig_TrustedProxiesDefault(t *testing.T) {
+	clearEnv(t)
+	require.NoError(t, os.Unsetenv("LABELER_RELAY_TRUSTED_PROXIES"))
+	t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "test-token")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, []netip.Prefix{
+		netip.MustParsePrefix("127.0.0.1/32"),
+		netip.MustParsePrefix("::1/128"),
+	}, cfg.TrustedProxies)
+}
+
+// TestConfig_TrustedProxiesCustom checks comma-separated CIDR parsing.
+func TestConfig_TrustedProxiesCustom(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+	t.Setenv("LABELER_RELAY_TRUSTED_PROXIES", "10.0.0.0/8,192.168.1.0/24")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("192.168.1.0/24"),
+	}, cfg.TrustedProxies)
+}
+
+// TestConfig_TrustedProxiesDisabled checks that empty and "none" disable
+// proxy trust, unlike unset, which selects the loopback default.
+func TestConfig_TrustedProxiesDisabled(t *testing.T) {
+	for _, value := range []string{"", "none"} {
+		t.Run("value "+value, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+			t.Setenv("LABELER_RELAY_TRUSTED_PROXIES", value)
+
+			cfg, err := config.Load()
+			require.NoError(t, err)
+			require.Empty(t, cfg.TrustedProxies, "value %q must disable proxy trust", value)
+		})
+	}
+}
+
+// TestConfig_TrustedProxiesInvalid checks that invalid entries fail startup.
+func TestConfig_TrustedProxiesInvalid(t *testing.T) {
+	t.Run("bad CIDR", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_TRUSTED_PROXIES", "notacidr")
+
+		_, err := config.Load()
+		require.Error(t, err, "malformed CIDR must fail loud, not fall back to a default")
+		require.Contains(t, err.Error(), "trusted_proxies")
+	})
+
+	t.Run("IPv4-mapped IPv6 prefix", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_TRUSTED_PROXIES", "::ffff:10.0.0.0/104")
+
+		_, err := config.Load()
+		require.Error(t, err, "IPv4-mapped IPv6 prefixes must be rejected so trust never hinges on an address-family mismatch")
+		require.Contains(t, err.Error(), "trusted_proxies")
+	})
+}
+
 // clearEnv unsets all LABELER_RELAY_* env vars for the duration of the test
 // by setting them to empty strings. t.Setenv restores on cleanup; Load treats
 // empty strings as "not set" and applies defaults.
@@ -237,6 +308,7 @@ func clearEnv(t *testing.T) {
 		"LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR",
 		"LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC",
 		"LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR",
+		"LABELER_RELAY_TRUSTED_PROXIES",
 	} {
 		t.Setenv(v, "")
 	}
