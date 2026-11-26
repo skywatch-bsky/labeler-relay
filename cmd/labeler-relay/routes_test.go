@@ -275,3 +275,34 @@ func TestDocs_TrustedProxiesDocumented(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(llms), "LABELER_RELAY_TRUSTED_PROXIES")
 }
+
+// TestDocs_LlmsEnvListComplete pins the llms.txt deployment guide to the full
+// configurable surface: every environment variable the loader reads and both
+// public query endpoints must appear, so the guide cannot silently fall
+// behind the configuration again.
+func TestDocs_LlmsEnvListComplete(t *testing.T) {
+	llms, err := os.ReadFile("../../llms.txt")
+	require.NoError(t, err)
+	text := string(llms)
+
+	for _, name := range []string{
+		"LABELER_RELAY_DB_PATH",
+		"LABELER_RELAY_LISTEN_ADDR",
+		"LABELER_RELAY_FIREHOSE_URL",
+		"LABELER_RELAY_ADMIN_TOKEN",
+		"LABELER_RELAY_RETENTION_WINDOW",
+		"LABELER_RELAY_REQUIRE_SIG",
+		"LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED",
+		"LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC",
+		"LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR",
+		"LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC",
+		"LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR",
+		"LABELER_RELAY_TRUSTED_PROXIES",
+		"LABELER_RELAY_SUBSCRIBER_BUF_SIZE",
+	} {
+		require.Contains(t, text, name, "llms.txt env list must document %s", name)
+	}
+
+	require.Contains(t, text, "`/xrpc/community.labeler.sync.getLabelers`")
+	require.Contains(t, text, "`/xrpc/community.labeler.sync.getLabeler`")
+}
