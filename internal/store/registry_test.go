@@ -470,3 +470,164 @@ func TestRegistry(t *testing.T) {
 		}
 	})
 }
+
+// TestUpsertMintsMonotonicObservedSeq verifies AC.1: first inserts mint
+// observed_seq 1, 2, 3 in insertion order (the DIDs here are deliberately out
+// of lexical order, so this cannot pass on DID order); re-upserting an
+// existing labeler through both the firehose and the manual path leaves its
+// original observed_seq untouched.
+func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	reg := store.NewLabelerRegistry(s)
+
+	dids := []string{"did:plc:zzz", "did:plc:mmm", "did:plc:aaa"}
+	for i, did := range dids {
+		if err := reg.Upsert(ctx, store.Labeler{
+			DID:       did,
+			Endpoint:  "https://example.com",
+			Source:    "firehose",
+			Enabled:   true,
+			UpdatedAt: int64(1000 + i),
+		}); err != nil {
+			t.Fatalf("Upsert %s failed: %v", did, err)
+		}
+	}
+
+	// Minted 1, 2, 3 in insertion order.
+	for i, did := range dids {
+		got, exists, err := reg.Get(ctx, did)
+		if err != nil || !exists {
+			t.Fatalf("Get %s failed: exists=%v err=%v", did, exists, err)
+		}
+		if got.ObservedSeq != int64(i+1) {
+			t.Errorf("expected %s observed_seq=%d, got %d", did, i+1, got.ObservedSeq)
+		}
+	}
+
+	// Re-upsert through the firehose path: no re-mint.
+	if err := reg.Upsert(ctx, store.Labeler{
+		DID:       dids[0],
+		Endpoint:  "https://example.com/v2",
+		Source:    "firehose",
+		Enabled:   true,
+		UpdatedAt: 2000,
+	}); err != nil {
+		t.Fatalf("firehose re-upsert failed: %v", err)
+	}
+
+	// Re-upsert through the manual path: still no re-mint.
+	if err := reg.Upsert(ctx, store.Labeler{
+		DID:       dids[0],
+		Endpoint:  "https://example.com/v3",
+		Source:    "manual",
+		Enabled:   true,
+		UpdatedAt: 3000,
+	}); err != nil {
+		t.Fatalf("manual re-upsert failed: %v", err)
+	}
+
+	got, _, err := reg.Get(ctx, dids[0])
+	if err != nil {
+		t.Fatalf("Get after re-upserts failed: %v", err)
+	}
+	if got.ObservedSeq != 1 {
+		t.Errorf("expected observed_seq to stay 1 after re-upserts, got %d", got.ObservedSeq)
+	}
+
+	// A later first insert mints above the existing maximum, not from a
+	// re-upsert's stale view of the table.
+	if err := reg.Upsert(ctx, store.Labeler{
+		DID:       "did:plc:late",
+		Endpoint:  "https://example.com",
+		Source:    "firehose",
+		Enabled:   true,
+		UpdatedAt: 4000,
+	}); err != nil {
+		t.Fatalf("late insert failed: %v", err)
+	}
+	late, exists, err := reg.Get(ctx, "did:plc:late")
+	if err != nil || !exists {
+		t.Fatalf("Get late failed: exists=%v err=%v", exists, err)
+	}
+	if late.ObservedSeq != 4 {
+		t.Errorf("expected late insert observed_seq=4, got %d", late.ObservedSeq)
+	}
+}
+
+// TestRecordErrorMintsObservedSeq verifies AC.1 for the discovery-error path:
+// RecordError on a fresh DID mints the next observed_seq like any first
+// insert; RecordError again on the same DID leaves it unchanged.
+func TestRecordErrorMintsObservedSeq(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	reg := store.NewLabelerRegistry(s)
+
+	// Two regular inserts first: observed_seq 1 and 2.
+	for i, did := range []string{"did:plc:one", "did:plc:two"} {
+		if err := reg.Upsert(ctx, store.Labeler{
+			DID:       did,
+			Endpoint:  "https://example.com",
+			Source:    "manual",
+			Enabled:   true,
+			UpdatedAt: int64(1000 + i),
+		}); err != nil {
+			t.Fatalf("Upsert %s failed: %v", did, err)
+		}
+	}
+
+	// RecordError on a fresh DID mints 3.
+	const errored = "did:plc:errored"
+	if err := reg.RecordError(ctx, errored, "resolution failed"); err != nil {
+		t.Fatalf("RecordError failed: %v", err)
+	}
+	got, exists, err := reg.Get(ctx, errored)
+	if err != nil || !exists {
+		t.Fatalf("Get errored failed: exists=%v err=%v", exists, err)
+	}
+	if got.ObservedSeq != 3 {
+		t.Errorf("expected RecordError mint observed_seq=3, got %d", got.ObservedSeq)
+	}
+
+	// RecordError again on the existing DID: unchanged.
+	if err := reg.RecordError(ctx, errored, "still failing"); err != nil {
+		t.Fatalf("second RecordError failed: %v", err)
+	}
+	got, _, err = reg.Get(ctx, errored)
+	if err != nil {
+		t.Fatalf("Get errored after second RecordError failed: %v", err)
+	}
+	if got.ObservedSeq != 3 {
+		t.Errorf("expected observed_seq to stay 3 after repeat RecordError, got %d", got.ObservedSeq)
+	}
+
+	// The next first insert continues above it.
+	if err := reg.Upsert(ctx, store.Labeler{
+		DID:       "did:plc:four",
+		Endpoint:  "https://example.com",
+		Source:    "manual",
+		Enabled:   true,
+		UpdatedAt: 5000,
+	}); err != nil {
+		t.Fatalf("Upsert four failed: %v", err)
+	}
+	fourth, exists, err := reg.Get(ctx, "did:plc:four")
+	if err != nil || !exists {
+		t.Fatalf("Get four failed: exists=%v err=%v", exists, err)
+	}
+	if fourth.ObservedSeq != 4 {
+		t.Errorf("expected next insert observed_seq=4, got %d", fourth.ObservedSeq)
+	}
+}

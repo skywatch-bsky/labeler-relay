@@ -144,7 +144,9 @@ func TestRoutes_RejectedRequestIncrementsMetric(t *testing.T) {
 
 // TestRoutes_ReadmeExamplesMatchResponses verifies AC.10's concrete check:
 // the README's documented request/response shapes match what the production
-// mux actually returns.
+// mux actually returns — a numeric observed_seq cursor when more pages exist,
+// and a last_upstream_seq key that is always present (null when never
+// ingested).
 func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	ts, reg := newRoutesEnv(t, 1000, 100000, loopbackTrusted)
 	ctx := context.Background()
@@ -159,10 +161,20 @@ func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	}))
 	require.NoError(t, reg.WriteCursor(ctx, did, 35916330))
 
-	// GET .../getLabelers?limit=50 — documented example response: a JSON
+	// A second, never-ingested labeler so a second page exists.
+	neverDid := "did:plc:k2vjpxvpxbnfyjzkb66cg7ju"
+	require.NoError(t, reg.Upsert(ctx, store.Labeler{
+		DID:       neverDid,
+		Endpoint:  "",
+		Source:    "firehose",
+		Enabled:   false,
+		UpdatedAt: 1,
+	}))
+
+	// GET .../getLabelers?limit=1 — documented example response: a JSON
 	// object with labelers (each carrying did, endpoint, source, enabled,
-	// last_upstream_seq when set) and a cursor when more pages exist.
-	resp, err := http.Get(ts.URL + "/xrpc/community.labeler.sync.getLabelers?limit=50")
+	// last_upstream_seq) and a cursor when more pages exist.
+	resp, err := http.Get(ts.URL + "/xrpc/community.labeler.sync.getLabelers?limit=1")
 	require.NoError(t, err)
 	var list map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&list))
@@ -178,6 +190,27 @@ func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	require.Equal(t, "manual", first["source"])
 	require.Equal(t, true, first["enabled"])
 	require.Equal(t, float64(35916330), first["last_upstream_seq"])
+
+	// The cursor is a JSON number — the observed_seq of the page's last row —
+	// not a quoted string.
+	require.Equal(t, float64(1), list["cursor"])
+
+	// The next page carries the never-ingested labeler: last_upstream_seq
+	// present with JSON null, and no cursor on the final page.
+	resp, err = http.Get(ts.URL + "/xrpc/community.labeler.sync.getLabelers?limit=1&cursor=1")
+	require.NoError(t, err)
+	var page2 map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page2))
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NotContains(t, page2, "cursor", "final page must omit cursor")
+	items, ok = page2["labelers"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	second, _ := items[0].(map[string]any)
+	require.Equal(t, neverDid, second["did"])
+	require.Contains(t, second, "last_upstream_seq")
+	require.Nil(t, second["last_upstream_seq"])
 
 	// GET .../getLabeler?did=... — documented single-lookup response.
 	resp, err = http.Get(ts.URL + "/xrpc/community.labeler.sync.getLabeler?did=" + did)
