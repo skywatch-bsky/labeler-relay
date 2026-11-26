@@ -1,119 +1,197 @@
 # labeler-relay
 
-A relay that aggregates multiple AT Protocol labeler streams into a single unified output. Instead of connecting to each labeler individually, consumers subscribe to one endpoint and receive all labels re-sequenced under a single monotonic cursor.
+labeler-relay combines AT Protocol labeler streams into one WebSocket stream for applications that consume labels. Consumers track one relay sequence number instead of a separate cursor for each labeler.
+
+## Install and run
+
+The instructions below build from source. You need Go 1.27.3 or later, Git, curl, and a Bash-compatible terminal. The repository does not specify a supported operating-system matrix. These commands use Unix shell syntax.
+
+No Bluesky account is required. The relay needs network access to the firehose, DID documents, and upstream labelers. A DID is an AT Protocol account identifier.
+
+1. Open a terminal in the folder where you want to keep the source.
+2. Download the source and enter its folder:
+
+   ```bash
+   git clone https://github.com/skywatch-bsky/labeler-relay.git
+   cd labeler-relay
+   ```
+
+3. Build the executable. Go downloads the required dependencies:
+
+   ```bash
+   go build -o labeler-relay ./cmd/labeler-relay
+   ```
+
+4. Enter a private admin token at the prompt. Choose a long, random value and keep it in your password manager.
+
+   ```bash
+   read -r -s -p 'Admin token: ' LABELER_RELAY_ADMIN_TOKEN
+   printf '\n'
+   export LABELER_RELAY_ADMIN_TOKEN
+   ```
+
+5. Start the relay on the local interface:
+
+   ```bash
+   LABELER_RELAY_LISTEN_ADDR=127.0.0.1:8080 ./labeler-relay
+   ```
+
+   The relay creates `labeler-relay.db` in the current folder and initializes its schema. No separate database server is required.
+   It watches the firehose for labeler service records and enables discovered labelers by default.
+   Discovery observes new firehose events. It is not an initial inventory of all existing labelers.
+
+6. Open another terminal and check the relay:
+
+   ```bash
+   curl --fail http://localhost:8080/_health
+   ```
+
+   A successful response is a JSON object with `head_seq`, `labeler_count`, `retention_floor`, and `retention_window_seconds`.
+   Counts can be zero before discovery receives events. Use the [admin API](#admin-api) to register a known labeler.
+
+7. To stop the relay, press Ctrl+C in its terminal.
+
+## Developer setup
+
+Use Go 1.27.3 or later, Git, and Make. Follow the source-download steps above, then run these commands from the repository root:
+
+```bash
+go mod download
+make build
+make test
+make lint
+```
+
+`make build` checks all packages with `go build ./...`. It does not create the executable used in the installation steps.
+
+Set `LABELER_RELAY_ADMIN_TOKEN` as shown above, then run:
+
+```bash
+LABELER_RELAY_LISTEN_ADDR=127.0.0.1:8080 go run ./cmd/labeler-relay
+```
+
+Check `/_health` for the JSON response described above. SQLite initializes automatically. Keep the database directory writable.
+The configuration loader reads environment variables, not a `.env` file. Keep tokens out of tracked files.
+
+| Command | Purpose |
+|---------|---------|
+| `make build` | Build all packages. |
+| `make test` | Run unit tests. |
+| `make lint` | Run `go vet ./...`. |
+| `make test-integration` | Run `internal/e2e/` tests with the `integration` tag and a five-minute timeout. Requires network access. |
+| `make cborgen` | Regenerate CBOR marshalling code, then build all packages. |
+
+Do not edit generated `cbor_gen.go` files by hand. Node.js and npm are optional tools for the [stream client](#stream-client).
+Bash, Python 3, and curl are required only for the [bulk importer](#bulk-import).
 
 ## What it does
 
-Every labeler on Bluesky exposes a `com.atproto.label.subscribeLabels` WebSocket. The relay connects to all of them simultaneously, ingests their label events, and rebroadcasts them as one stream under `community.labeler.sync.subscribeLabelers`. Downstream consumers track a single cursor regardless of how many upstream labelers exist.
+The relay subscribes to enabled labelers through `com.atproto.label.subscribeLabels` and publishes events through `community.labeler.sync.subscribeLabelers`.
+It discovers labelers from `app.bsky.labeler.service` firehose records or accepts manual registration through the admin API.
 
-Labels are passed through byte-faithfully — signatures and all signed fields are identical to what the origin labeler emitted. Consumers can still verify any label against the origin labeler's `#atproto_label` signing key.
-
-Labelers are discovered automatically by watching the AT Protocol firehose for `app.bsky.labeler.service` records, or registered manually via an admin API.
-
-## Quick start
-
-```bash
-# Build
-make build
-
-# Run (admin token is required)
-LABELER_RELAY_ADMIN_TOKEN=your-secret-token ./labeler-relay
-```
-
-The relay starts on `:8080` by default. It immediately begins watching the firehose for labeler discovery and will auto-subscribe to any labeler it finds.
+Relayed labels retain their signatures and signed fields. Consumers can verify them against the origin labeler's `#atproto_label` signing key.
+The signature policy rejects missing signatures. It does not establish that a signature is valid.
 
 ## Configuration
 
-All configuration is via environment variables, prefixed `LABELER_RELAY_`.
+All configuration uses environment variables with the `LABELER_RELAY_` prefix.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LABELER_RELAY_DB_PATH` | `labeler-relay.db` | SQLite database path. |
-| `LABELER_RELAY_LISTEN_ADDR` | `:8080` | HTTP listen address. |
+| `LABELER_RELAY_LISTEN_ADDR` | `:8080` | HTTP listen address. The default listens on all interfaces. |
 | `LABELER_RELAY_FIREHOSE_URL` | `wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos` | AT Protocol firehose URL. |
-| `LABELER_RELAY_ADMIN_TOKEN` | *(required)* | Bearer token for the `/admin/` API. |
-| `LABELER_RELAY_RETENTION_WINDOW` | `336h` (14 days) | How long events are kept. Supports Go durations and `Nd` shorthand (e.g. `7d`). |
-| `LABELER_RELAY_REQUIRE_SIG` | `true` | Drop unsigned labels by default. Per-labeler overrides are possible. |
-| `LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED` | `true` | Auto-enable labelers discovered via firehose. |
-| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC` | `500` | Per-labeler ingest rate limit (labels/sec). |
-| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR` | `100000` | Per-labeler ingest rate limit (labels/hour). |
+| `LABELER_RELAY_ADMIN_TOKEN` | Required | Bearer token for the `/admin/` API. Must not be empty. |
+| `LABELER_RELAY_RETENTION_WINDOW` | `336h` (14 days) | Event retention period. Accepts Go durations or whole days such as `7d`. Must be positive. |
+| `LABELER_RELAY_REQUIRE_SIG` | `true` | Reject labels without signatures. Supports per-labeler overrides through the admin API. |
+| `LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED` | `true` | Enable newly discovered labelers. |
+| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC` | `500` | Positive integer limit per labeler, in labels per second. |
+| `LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR` | `100000` | Positive integer limit per labeler, in labels per hour. |
+| `LABELER_RELAY_SUBSCRIBER_BUF_SIZE` | `512` | Event buffer per downstream subscriber. Integer from 1 through 65536. |
+
+Unset or empty optional variables use their defaults. Use `true` or `false` for boolean settings.
+Invalid boolean, integer, or duration values prevent startup. Slow consumers can lose their connection when their buffer fills.
+
+Retention is always enabled. An unset `LABELER_RELAY_RETENTION_WINDOW` uses the 14-day default, and a window of zero or less is rejected at startup; there is no keep-forever mode. Set a very large window, such as `9999d`, to retain events indefinitely.
 
 ## Endpoints
 
 ### WebSocket: subscribe to labels
 
-```
+```text
 ws://localhost:8080/xrpc/community.labeler.sync.subscribeLabelers
 ws://localhost:8080/xrpc/community.labeler.sync.subscribeLabelers?cursor=100
 ```
 
-Connect with no cursor for live-only. Connect with `cursor=N` to backfill from `seq > N`, then seamlessly continue live. The stream emits three frame types:
+Without a cursor, the connection starts at the current stream head. With `cursor=N`, it replays retained events with `seq > N`, then continues live.
+Save the last processed relay `seq` to resume after a disconnect.
 
-**`label`** — relayed labels from an upstream labeler:
+Each binary WebSocket message contains two concatenated CBOR objects: an XRPC header and a body. CBOR is a binary data format.
+Message headers use `{"op":1,"t":"#labels"}`, `#service`, or `#info`. Error headers use `{"op":-1}`.
+The JSON below illustrates decoded bodies, not JSON messages sent over the socket.
+
+**`#labels`** carries a batch from an upstream labeler:
 
 ```json
 {
-  "type": "label",
   "seq": 42,
   "src": "did:plc:ar7c4by46qjdydhdevvrndac",
-  "record": {
-    "$type": "com.atproto.label.subscribeLabels#labels",
-    "seq": 35916330,
-    "labels": [
-      {
-        "src": "did:plc:ar7c4by46qjdydhdevvrndac",
-        "uri": "at://did:plc:example/app.bsky.feed.post/abc123",
-        "cid": "bafyrei...",
-        "val": "porn",
-        "cts": "2026-06-02T14:05:50.164Z",
-        "ver": 1,
-        "sig": { "$bytes": "base64..." }
-      }
-    ]
-  }
+  "upstreamSeq": 35916330,
+  "labels": [
+    {
+      "src": "did:plc:ar7c4by46qjdydhdevvrndac",
+      "uri": "at://did:plc:example/app.bsky.feed.post/abc123",
+      "val": "spam",
+      "cts": "2026-06-02T14:05:50.164Z",
+      "ver": 1,
+      "sig": { "$bytes": "base64..." }
+    }
+  ]
 }
 ```
 
-Top-level `seq` is the relay-minted sequence. `record.seq` is the upstream labeler's sequence. Each label inside `record.labels` is a complete `com.atproto.label.defs#label` passed through with all fields intact.
+`seq` is the relay sequence. `upstreamSeq` is the upstream sequence. Each item in `labels` is a `com.atproto.label.defs#label`.
+`$bytes` illustrates binary signature bytes in JSON. The sample signature is a placeholder.
 
-**`service`** — a labeler's service declaration was created, updated, or deleted:
+**`#service`** carries a service declaration observed through the firehose:
 
 ```json
 {
-  "type": "service",
   "seq": 43,
   "src": "did:plc:example",
   "op": "create",
   "record": {
     "$type": "app.bsky.labeler.service",
-    "policies": { "labelValues": ["spam", "nsfw"], "labelValueDefinitions": [...] },
-    "createdAt": "2026-06-01T00:00:00Z",
-    "reasonTypes": [...],
-    "subjectTypes": [...],
-    "subjectCollections": [...]
+    "policies": { "labelValues": ["spam"] },
+    "createdAt": "2026-06-01T00:00:00Z"
   }
 }
 ```
 
-The record is a complete `app.bsky.labeler.service` with all fields. `record` is null for `"op": "delete"`.
+`op` is `create`, `update`, or `delete`. The full service record accompanies create and update events. Delete events omit `record`.
 
-**`info`** — control frame (e.g. cursor below the retention floor):
+**`#info`** reports an outdated cursor:
 
 ```json
 {
-  "type": "info",
   "name": "OutdatedCursor",
-  "message": "cursor is before retention floor"
+  "message": "cursor is below the retention floor; resuming from the oldest available event"
 }
 ```
+
+If the cursor is below `retention_floor - 1`, the relay sends this message and resumes at the oldest retained event.
+A cursor equal to `retention_floor - 1` starts there without an info message.
+
+Error bodies contain `error` and `message`. The relay closes the connection after `InvalidRequest` for a malformed cursor or `FutureCursor` for a cursor above the head.
+It attempts to send `ConsumerTooSlow` before closing a consumer whose buffer overflows. Socket write failures can close the connection without an error frame.
 
 ### Health check
 
 ```bash
-curl http://localhost:8080/_health
+curl --fail http://localhost:8080/_health
 ```
 
-Returns:
+Example response:
 
 ```json
 {
@@ -124,102 +202,116 @@ Returns:
 }
 ```
 
+The endpoint returns HTTP 200 on success or HTTP 500 if a store read fails.
+`labeler_count` includes disabled registry entries. It is not the number of connected upstreams.
+
 ### Metrics
 
-```
+```text
 GET /metrics
 ```
 
-Prometheus-format metrics: head seq, per-labeler ingest rates, dropped unsigned counts, consumer count, connected upstreams, throttle events.
+Prometheus metrics include the head sequence, retention floor, per-labeler ingest counters, dropped unsigned labels, consumer count, connected upstreams, and throttle counters.
 
 ### Admin API
 
 All admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>`.
+Set `LABELER_RELAY_ADMIN_TOKEN` in the terminal used for these commands, using the same token as the running relay.
+Replace `{did}` in paths with the labeler's DID.
 
 **Add a labeler:**
 
 ```bash
-curl -X POST http://localhost:8080/admin/labelers \
+curl --fail -X POST http://localhost:8080/admin/labelers \
   -H "Authorization: Bearer $LABELER_RELAY_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"did": "did:plc:ar7c4by46qjdydhdevvrndac"}'
 ```
 
-The relay resolves the labeler's endpoint from its DID document automatically.
+The relay resolves the endpoint from the DID document and adds or enables the registry entry. HTTP 201 returns the stored entry.
 
 **List labelers:**
 
 ```bash
-curl http://localhost:8080/admin/labelers \
+curl --fail http://localhost:8080/admin/labelers \
   -H "Authorization: Bearer $LABELER_RELAY_ADMIN_TOKEN"
 ```
 
-**Disable/enable a labeler:**
+**Disable or enable a labeler:**
 
 ```bash
-curl -X POST http://localhost:8080/admin/labelers/{did}/disable \
+curl --fail -X POST 'http://localhost:8080/admin/labelers/{did}/disable' \
   -H "Authorization: Bearer $LABELER_RELAY_ADMIN_TOKEN"
 
-curl -X POST http://localhost:8080/admin/labelers/{did}/enable \
+curl --fail -X POST 'http://localhost:8080/admin/labelers/{did}/enable' \
   -H "Authorization: Bearer $LABELER_RELAY_ADMIN_TOKEN"
 ```
 
-**Remove a labeler:**
+`DELETE /admin/labelers/{did}` also disables the labeler. It does not delete the registry entry or retained events.
+These three operations return HTTP 204 on success or HTTP 404 for an unknown DID.
+
+**Set the signature requirement for one labeler:**
 
 ```bash
-curl -X DELETE http://localhost:8080/admin/labelers/{did} \
-  -H "Authorization: Bearer $LABELER_RELAY_ADMIN_TOKEN"
+curl --fail -X PATCH 'http://localhost:8080/admin/labelers/{did}' \
+  -H "Authorization: Bearer $LABELER_RELAY_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"require_sig": true}'
 ```
+
+Use `false` to allow unsigned labels or `null` to restore the global default. The `require_sig` field is required.
+HTTP 200 returns the stored entry. A policy change restarts the upstream subscription.
 
 ## Bulk import
 
-The `scripts/import-labelers.sh` script reads a CSV of labelers and registers them via the admin API:
+`scripts/import-labelers.sh` registers labelers through the admin API. It requires Bash, Python 3, and curl.
+Run it from the repository root with the admin token already exported:
 
 ```bash
-./scripts/import-labelers.sh labelers.csv http://localhost:8080 your-admin-token
+./scripts/import-labelers.sh labelers.csv http://localhost:8080
 ```
 
-The CSV needs a `did` column and optionally a `visibility` column. If `visibility` is present, only rows with `visibility=Declared` are imported.
+Arguments are the CSV path, optional relay URL, and optional admin token. The URL defaults to `http://localhost:8080`.
+If the third argument is absent, the script uses `LABELER_RELAY_ADMIN_TOKEN`. Prefer the environment variable to avoid placing the token in command history.
+
+The CSV must contain `did` and `visibility` columns. The script imports only rows with a nonempty DID and `visibility` equal to `Declared`.
+It strips surrounding whitespace from both values. Without the visibility column, it imports no rows.
 
 ## Stream client
 
-A TypeScript utility for decoding the relay's output stream is included in `utils/`:
+`utils/stream-client.ts` decodes the binary stream. It requires Node.js and npm. From the repository root:
 
 ```bash
-cd utils && npm install
-
-# Live tail
+cd utils
+npm ci
 npx tsx stream-client.ts
+```
 
-# Custom URL
+The client accepts an optional URL followed by an optional cursor. It has no named flags.
+
+```bash
 npx tsx stream-client.ts ws://relay.example.com/xrpc/community.labeler.sync.subscribeLabelers
-
-# Resume from cursor
 npx tsx stream-client.ts ws://localhost:8080/xrpc/community.labeler.sync.subscribeLabelers 100
 ```
 
-Outputs NDJSON to stdout (pipe to `jq`, log files, etc.). Connection status and errors go to stderr.
+When supplying a separate cursor, use a URL without an existing query string.
+Label and service events go to stdout as newline-delimited JSON. Connection status, info frames, and errors go to stderr.
+The client changes `#labels` into `type: "label"` and nests the batch in `record`, with the upstream sequence in `record.seq`.
+It renders deleted service records as `record: null`. These are client output conventions, not the wire format.
 
 ## Production deployment
 
-The relay serves `ws://` only. For `wss://`, put a reverse proxy in front (nginx, caddy, etc.) that terminates TLS and forwards to the relay's listen address.
+The relay serves unencrypted HTTP and WebSocket connections. Use a reverse proxy with TLS termination for HTTPS and `wss://` access.
+Restrict direct access to the relay port. The stream, health, and metrics endpoints do not require the admin token.
 
-The SQLite database handles the write throughput of hundreds of labelers comfortably. WAL mode is enabled automatically.
-
-## Development
-
-```bash
-make build          # Build all packages
-make test           # Run unit tests
-make test-integration  # Run E2E tests (requires network)
-make cborgen        # Regenerate CBOR marshalling code
-make lint           # Run go vet
-```
+SQLite uses WAL mode automatically. Use persistent storage and run one relay process per database.
+Size storage and measure throughput for your workload. The default retention period is 14 days.
 
 ## Lexicon
 
-The output subscription lexicon is defined in `lexicons/community/labeler/sync/subscribeLabelers.json`. It follows AT Protocol conventions: CBOR-encoded frames over WebSocket with `{op, t}` headers.
+The subscription schema is [subscribeLabelers.json](lexicons/community/labeler/sync/subscribeLabelers.json).
+It defines the `community.labeler.sync.subscribeLabelers` message bodies and cursor parameter.
 
 ## License
 
-MIT
+[MIT](LICENSE)
