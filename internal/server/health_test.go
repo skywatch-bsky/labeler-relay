@@ -69,7 +69,6 @@ func TestHealth_AC10_3_ReportsHeadSeqLabelerCountAndRetention(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Initially: no events, no labelers.
 	body := getHealth(t, ts)
 	require.Equal(t, int64(0), body.HeadSeq, "head_seq must be 0 with no events")
 	require.Equal(t, 0, body.LabelerCount, "labeler_count must be 0 with no labelers")

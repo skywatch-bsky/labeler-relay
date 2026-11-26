@@ -57,14 +57,12 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Parse retention window.
 	retentionStr := getEnvOr("LABELER_RELAY_RETENTION_WINDOW", "336h") // 14 days
 	cfg.RetentionWindow, err = parseDuration(retentionStr)
 	if err != nil {
 		return Config{}, fmt.Errorf("failed to load config: invalid retention_window %q: %w", retentionStr, err)
 	}
 
-	// Parse rate limits.
 	cfg.UpstreamRateLimit.PerSec, err = parseIntEnv("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC", "upstream_rate_limit.per_sec", 500)
 	if err != nil {
 		return Config{}, fmt.Errorf("failed to load config: %w", err)

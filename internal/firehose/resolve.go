@@ -40,13 +40,11 @@ func NewIndigoResolver(r identity.Resolver) DIDResolver {
 // labelers advertise only a base serviceEndpoint (e.g. "https://mod.bsky.app")
 // in their DID documents; this method appends the XRPC subscription path.
 func (r *indigoResolver) LabelerEndpoint(ctx context.Context, did string) (string, error) {
-	// Resolve the DID document.
 	didDoc, err := r.inner.ResolveDID(ctx, syntax.DID(did))
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve DID: %w", err)
 	}
 
-	// Find the atproto_labeler service.
 	// Match on Type="AtprotoLabeler" as primary, or ID containing "#atproto_labeler" as fallback.
 	var base string
 	for _, svc := range didDoc.Service {

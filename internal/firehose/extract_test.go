@@ -124,7 +124,6 @@ func TestExtractLabelerServiceOpsDelete(t *testing.T) {
 	}
 }
 
-// TestExtractLabelerServiceOpsEmptyOps tests that commits with no ops return empty slice.
 func TestExtractLabelerServiceOpsEmptyOps(t *testing.T) {
 	carData := []byte{1, 0}
 
@@ -174,7 +173,6 @@ func TestExtractLabelerServiceOpsPathParsing(t *testing.T) {
 
 
 
-// Helper: create a dummy CID for testing by hashing input.
 // LexLink is a type alias for cid.Cid.
 func testCID(id string) *util.LexLink {
 	// Create a CID from a hash of the input string.

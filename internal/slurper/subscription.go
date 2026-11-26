@@ -65,7 +65,6 @@ func (s *subscription) run(ctx context.Context) error {
 			sleepMs = backoff.MaxMs
 		}
 
-		// Sleep with context awareness.
 		select {
 		case <-time.After(time.Duration(sleepMs) * time.Millisecond):
 		case <-ctx.Done():
@@ -76,16 +75,13 @@ func (s *subscription) run(ctx context.Context) error {
 
 // dial establishes a WebSocket connection and processes frames via indigo's HandleRepoStream.
 func (s *subscription) dial(ctx context.Context) error {
-	// Read the current cursor.
 	lastSeq, err := s.registry.ReadCursor(ctx, s.labeler.DID)
 	if err != nil {
 		return fmt.Errorf("failed to read cursor: %w", err)
 	}
 
-	// Build the subscription URL with cursor parameter.
 	endpoint := s.labeler.Endpoint
 
-	// Convert HTTP/HTTPS to WS/WSS scheme.
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return fmt.Errorf("invalid endpoint URL: %w", err)
@@ -96,7 +92,6 @@ func (s *subscription) dial(ctx context.Context) error {
 		u.Scheme = "wss"
 	}
 
-	// Add cursor parameter if we have a resume point.
 	if lastSeq != nil {
 		q := u.Query()
 		q.Set("cursor", fmt.Sprintf("%d", *lastSeq))
@@ -105,7 +100,6 @@ func (s *subscription) dial(ctx context.Context) error {
 
 	endpoint = u.String()
 
-	// Dial the WebSocket.
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
@@ -115,13 +109,11 @@ func (s *subscription) dial(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	// Build the frame handler callbacks.
 	sched := sequential.NewScheduler(s.labeler.DID, s.handleEvent)
 
 	// Wrap the scheduler's Shutdown in a deferred call to ensure cleanup.
 	defer sched.Shutdown()
 
-	// Call HandleRepoStream to consume frames.
 	return stream.HandleRepoStream(ctx, conn, sched, s.log)
 }
 
@@ -137,7 +129,6 @@ func (s *subscription) handleEvent(ctx context.Context, evt *stream.XRPCStreamEv
 
 // handleLabelLabels processes a #labels frame.
 func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.LabelSubscribeLabels_Labels) error {
-	// Process each label in the frame.
 	var kept []*atproto.LabelDefs_Label
 
 	sigRequired := SigRequired(s.labeler.RequireSig, s.sigDefault)
@@ -147,7 +138,6 @@ func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.Label
 			return fmt.Errorf("rate limiter failed: %w", err)
 		}
 
-		// Check if we should keep this label.
 		if !KeepLabel(label, sigRequired) {
 			if s.onDropUnsigned != nil {
 				s.onDropUnsigned(s.labeler.DID)
@@ -194,7 +184,6 @@ func (s *subscription) handleLabelLabels(ctx context.Context, evt *atproto.Label
 
 // handleLabelInfo processes a #info frame (control signal, not persisted).
 func (s *subscription) handleLabelInfo(evt *atproto.LabelSubscribeLabels_Info) error {
-	// Log the info frame but do not persist it.
 	s.log.Debug("received upstream #info frame", "labeler", s.labeler.DID, "message", evt.Message)
 	return nil
 }
@@ -202,6 +191,5 @@ func (s *subscription) handleLabelInfo(evt *atproto.LabelSubscribeLabels_Info) e
 // handleError processes an error frame.
 func (s *subscription) handleError(evt *stream.ErrorFrame) error {
 	s.log.Error("received error frame", "labeler", s.labeler.DID, "error", evt.Error)
-	// Break to trigger redial.
 	return fmt.Errorf("upstream error: %s", evt.Error)
 }

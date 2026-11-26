@@ -110,7 +110,6 @@ func TestRateLimitAC7_2(t *testing.T) {
 	go func() {
 		for i := 0; i < 5; i++ {
 			_ = limiterA.Wait(ctx)
-			// Don't sleep; just hammer it
 		}
 	}()
 

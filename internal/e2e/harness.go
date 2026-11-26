@@ -111,7 +111,6 @@ func NewHarness(t *testing.T) (*Harness, error) {
 		t:      t,
 	}
 
-	// Condition-based wait: poll /_health until 200 or deadline.
 	if err := h.waitReady(5 * time.Second); err != nil {
 		cancel()
 		return nil, fmt.Errorf("relay did not become ready: %w", err)
