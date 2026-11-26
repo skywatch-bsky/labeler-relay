@@ -470,3 +470,57 @@ func TestAdminAPI(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 }
+
+// TestAdminListOmitsObservedSeq verifies AC.8: the admin add, patch, and list
+// responses encode store.Labeler directly but must not leak the internal
+// ObservedSeq property (regression guard for its json:"-" tag).
+func TestAdminListOmitsObservedSeq(t *testing.T) {
+	_, api, token := setupTestEnv(t)
+	ctx := context.Background()
+
+	handler := api.Routes()
+
+	// Add via the admin API: the 201 body echoes the stored entry.
+	rec := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"did":"did:plc:labeler1"}`)
+	req := httptest.NewRequest("POST", "/admin/labelers", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assertNoObservedSeqKey(t, rec.Body.String())
+
+	// Precondition: the stored row carries a minted observed_seq, so a leak
+	// would actually show up in the responses below.
+	stored, found, err := api.registry.Get(ctx, "did:plc:labeler1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Greater(t, stored.ObservedSeq, int64(0),
+		"precondition: the stored row must have a minted observed_seq")
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("PATCH", "/admin/labelers/did:plc:labeler1", bytes.NewBufferString(`{"require_sig": true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assertNoObservedSeqKey(t, rec.Body.String())
+
+	// List.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/admin/labelers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assertNoObservedSeqKey(t, rec.Body.String())
+}
+
+// assertNoObservedSeqKey checks that raw is valid JSON carrying no
+// ObservedSeq property anywhere.
+func assertNoObservedSeqKey(t *testing.T, raw string) {
+	t.Helper()
+	var decoded any
+	require.NoError(t, json.Unmarshal([]byte(raw), &decoded), "response must be valid JSON: %s", raw)
+	require.NotContains(t, raw, "ObservedSeq",
+		`admin JSON must not carry the internal ObservedSeq property (json:"-" regression)`)
+}

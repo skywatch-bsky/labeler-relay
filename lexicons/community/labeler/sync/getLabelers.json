@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "query",
-      "description": "List the labelers registered on this relay, in ascending DID order. Public endpoint, rate limited per client IP.",
+      "description": "List the labelers registered on this relay, oldest-observed first. Public endpoint, rate limited per client IP.",
       "parameters": {
         "type": "params",
         "properties": {
@@ -16,8 +16,8 @@
             "description": "Maximum number of labelers to return. Values outside 1-100 are rejected with InvalidRequest, not clamped."
           },
           "cursor": {
-            "type": "string",
-            "description": "Opaque pagination cursor: the did of the last labeler on the previous page. Pass the cursor from a response back to fetch the next page; a response without a cursor is the last page."
+            "type": "integer",
+            "description": "The observed_seq of the last labeler on the previous page. Pass it back to fetch the next page; a response without a cursor is the last page."
           },
           "enabled": {
             "type": "boolean",
@@ -33,15 +33,15 @@
           "properties": {
             "labelers": {
               "type": "array",
-              "description": "Registered labelers in ascending DID order. Empty array when nothing matches.",
+              "description": "Registered labelers oldest-observed first. Empty array when nothing matches.",
               "items": {
                 "type": "ref",
                 "ref": "community.labeler.sync.defs#labelerView"
               }
             },
             "cursor": {
-              "type": "string",
-              "description": "The did of the last labeler on this page. Present only when further pages exist."
+              "type": "integer",
+              "description": "The observed_seq of the last labeler on this page. Present only when further pages exist."
             }
           }
         }

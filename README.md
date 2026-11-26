@@ -216,21 +216,22 @@ Example response:
       "did": "did:plc:k2vjpxvpxbnfyjzkb66cg7ju",
       "endpoint": "",
       "source": "firehose",
-      "enabled": false
+      "enabled": false,
+      "last_upstream_seq": null
     }
   ],
-  "cursor": "did:plc:k2vjpxvpxbnfyjzkb66cg7ju"
+  "cursor": 2
 }
 ```
 
-`labelers` lists registry entries in ascending DID order. `source` is `firehose` for discovered labelers or `manual` for entries added through the admin API.
-`endpoint` stays empty until discovery resolves the labeler's DID document. `last_upstream_seq` is the last sequence ingested from that labeler; it is absent for labelers that have never ingested.
-`cursor` is the `did` of the last labeler on the page. Pass it back to fetch the next page; a response without `cursor` is the last page.
+`labelers` lists registry entries oldest-observed first: the order in which the relay first observed them, not DID order. `source` is `firehose` for discovered labelers or `manual` for entries added through the admin API.
+`endpoint` stays empty until discovery resolves the labeler's DID document. `last_upstream_seq` is the last sequence ingested from that labeler; it is `null` when the labeler has never ingested.
+`cursor` is the `observed_seq` of the last labeler on the page. Pass it back to fetch the next page; a response without `cursor` is the last page.
 
 Parameters:
 
 - `limit` (optional, default `50`): integer from 1 through 100. Out-of-range or non-integer values return HTTP 400 `InvalidRequest`. Values are rejected, not clamped.
-- `cursor` (optional): the `did` of the last labeler on the previous page.
+- `cursor` (optional): the `observed_seq` of the last labeler on the previous page. A non-negative integer; non-integer or negative values return HTTP 400 `InvalidRequest`. A cursor past the last labeler returns an empty list, so walking past the end is safe.
 - `enabled` (optional): `true` returns only enabled labelers, `false` only disabled ones. Omit it to receive all labelers.
 
 This loop walks every page:
@@ -244,6 +245,8 @@ while :; do
   [ -z "$cursor" ] && break
 done
 ```
+
+The cursor is a JSON number; `jq -r` passes it through unchanged.
 
 **Look up one labeler:**
 
@@ -267,7 +270,7 @@ The `did` parameter is required. A malformed or unknown DID returns HTTP 400 `In
 
 Error responses are JSON objects with `error` and `message`:
 
-- HTTP 400 `InvalidRequest`: a malformed parameter, such as an out-of-range `limit`, an `enabled` value other than `true` or `false`, or a missing, malformed, or unknown `did`.
+- HTTP 400 `InvalidRequest`: a malformed parameter, such as an out-of-range `limit`, a non-integer or negative `cursor`, an `enabled` value other than `true` or `false`, or a missing, malformed, or unknown `did`.
 - HTTP 429 `RateLimitExceeded`: the per-client-IP limit is exhausted. A `Retry-After: 1` header is a retry hint; an exhausted hourly budget can outlast it. For a reverse proxy, set `LABELER_RELAY_TRUSTED_PROXIES` to its CIDR ranges so the limiter can use client IPs from `X-Forwarded-For`. The default covers a same-host proxy, such as Caddy, that connects over loopback.
 - HTTP 500 `InternalServerError`: a registry read failed on the server.
 

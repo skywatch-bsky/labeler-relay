@@ -34,7 +34,93 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("failed to execute schema: %w", err)
 	}
 
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate schema: %w", err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// idxLabelersObservedSeq is the unique index backing the pagination cursor
+// sequence. It lives in migrate rather than schema.sql because on an
+// old-shape database it would fail before the column exists: schema.sql runs
+// unconditionally on every open, while migrate guarantees the column first
+// (fresh databases get it from schema.sql, old ones from the ALTER below).
+const idxLabelersObservedSeq = `CREATE UNIQUE INDEX IF NOT EXISTS idx_labelers_observed_seq ON labelers(observed_seq)`
+
+// migrate brings databases created before the observed_seq revision up to the
+// current shape. It is idempotent: fresh databases already have the column
+// from schema.sql and run only the IF NOT EXISTS index creation.
+//
+// The migration is transactional and is the recovery contract: the database is
+// either fully migrated or untouched. A crash (or a mid-backfill failure)
+// rolls the whole migration back, so no mixed NULL/non-NULL state is ever
+// reachable and the next Open simply reruns it.
+func migrate(db *sql.DB) error {
+	// Does labelers already carry observed_seq? (Pre-migration databases do not.)
+	hasObservedSeq := false
+	rows, err := db.Query("PRAGMA table_info(labelers)")
+	if err != nil {
+		return fmt.Errorf("failed to inspect labelers schema: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		// table_info columns: cid, name, type, notnull, dflt_value, pk.
+		// dflt_value is nullable, so scan it into an interface placeholder.
+		var name string
+		var cid, notnull, pk int
+		var colType string
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("failed to scan labelers schema: %w", err)
+		}
+		if name == "observed_seq" {
+			hasObservedSeq = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to inspect labelers schema: %w", err)
+	}
+
+	if !hasObservedSeq {
+		// One transaction: ALTER, backfill, unique index. BeginTx (not
+		// standalone BEGIN/COMMIT Execs) because db is a pooled *sql.DB and
+		// separate Execs could land on different connections.
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin observed_seq migration: %w", err)
+		}
+		defer tx.Rollback()
+
+		// Right after the ALTER every existing row is NULL, so numbering all
+		// rows from 1 is collision-free. Rowid order reflects original insert
+		// order in practice, but external maintenance (e.g. VACUUM) can change
+		// implicit rowids on tables without an INTEGER PRIMARY KEY, so the
+		// backfill order is a practical approximation of observation order,
+		// not a guarantee.
+		for _, stmt := range []string{
+			`ALTER TABLE labelers ADD COLUMN observed_seq INTEGER`,
+			`WITH numbered AS (SELECT did, ROW_NUMBER() OVER (ORDER BY rowid) AS rn FROM labelers)
+			 UPDATE labelers SET observed_seq = (SELECT rn FROM numbered WHERE numbered.did = labelers.did)`,
+			idxLabelersObservedSeq,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return fmt.Errorf("observed_seq migration failed: %w", err)
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit observed_seq migration: %w", err)
+		}
+	}
+
+	// Unconditional: fresh databases reach this without the migration branch
+	// above, so the index must be created here for them too.
+	if _, err := db.Exec(idxLabelersObservedSeq); err != nil {
+		return fmt.Errorf("failed to ensure idx_labelers_observed_seq: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() error {

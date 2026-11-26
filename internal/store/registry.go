@@ -18,6 +18,10 @@ type Labeler struct {
 	LastUpstreamSeq *int64
 	LastError       string
 	UpdatedAt       int64
+	// ObservedSeq is the internal first-observation sequence used for
+	// first-observed ordering and getLabelers pagination. json:"-" keeps it
+	// out of admin JSON, which encodes store.Labeler directly.
+	ObservedSeq int64 `json:"-"`
 }
 
 type LabelerRegistry struct {
@@ -52,9 +56,15 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 	// policy are preserved in both cases. A successful upsert clears
 	// last_error: the row resolved cleanly, so any prior discovery error is
 	// stale.
+	//
+	// observed_seq is minted at first insert only (MAX+1 over the table); the
+	// ON CONFLICT branches never list it, so re-upserts keep the original
+	// value and the sequence stays monotonic and never reused. SQLite
+	// serializes writers (single process, busy_timeout), so concurrent
+	// first-inserts stay monotonic.
 	query := `
-		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(observed_seq), 0) + 1 FROM labelers), ?)
 		ON CONFLICT(did) DO UPDATE SET
 			endpoint = excluded.endpoint,
 			last_error = NULL,
@@ -62,8 +72,8 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 	`
 	if labeler.Source == "manual" {
 		query = `
-		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(observed_seq), 0) + 1 FROM labelers), ?)
 		ON CONFLICT(did) DO UPDATE SET
 			endpoint = excluded.endpoint,
 			source = excluded.source,
@@ -151,10 +161,10 @@ func (r *LabelerRegistry) Get(ctx context.Context, did string) (Labeler, bool, e
 	var lastError *string
 
 	err := r.store.DB().QueryRowContext(ctx,
-		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at
+		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at
 		 FROM labelers WHERE did = ?`,
 		did,
-	).Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.UpdatedAt)
+	).Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.ObservedSeq, &labeler.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return Labeler{}, false, nil
@@ -175,8 +185,8 @@ func (r *LabelerRegistry) Get(ctx context.Context, did string) (Labeler, bool, e
 
 func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 	rows, err := r.store.DB().QueryContext(ctx,
-		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at
-		 FROM labelers ORDER BY did`)
+		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at
+		 FROM labelers ORDER BY observed_seq ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list labelers: %w", err)
 	}
@@ -190,7 +200,7 @@ func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 		var lastUpstreamSeq *int64
 		var lastError *string
 
-		if err := rows.Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.UpdatedAt); err != nil {
+		if err := rows.Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.ObservedSeq, &labeler.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan labeler: %w", err)
 		}
 
@@ -212,8 +222,10 @@ func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 }
 
 func (r *LabelerRegistry) ListEnabled(ctx context.Context) ([]Labeler, error) {
+	// ORDER BY did is retained deliberately: ListEnabled feeds Reconcile's
+	// internal set semantics, where order is irrelevant.
 	rows, err := r.store.DB().QueryContext(ctx,
-		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, updated_at
+		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at
 		 FROM labelers WHERE enabled = 1 ORDER BY did`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list enabled labelers: %w", err)
@@ -228,7 +240,7 @@ func (r *LabelerRegistry) ListEnabled(ctx context.Context) ([]Labeler, error) {
 		var lastUpstreamSeq *int64
 		var lastError *string
 
-		if err := rows.Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.UpdatedAt); err != nil {
+		if err := rows.Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.ObservedSeq, &labeler.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan labeler: %w", err)
 		}
 
@@ -290,13 +302,15 @@ func (r *LabelerRegistry) WriteCursor(ctx context.Context, did string, seq int64
 }
 
 // RecordError records or updates an error message for a labeler.
-// For fresh labelers (not yet in the registry), inserts a minimal row with source='firehose', enabled=0.
-// For existing labelers, updates only last_error and updated_at, preserving source and enabled.
+// For fresh labelers (not yet in the registry), inserts a minimal row with source='firehose', enabled=0,
+// minting the next observed_seq like any first insert.
+// For existing labelers, updates only last_error and updated_at, preserving source and enabled
+// (and the existing observed_seq, which the ON CONFLICT branch never lists).
 // This ensures manual labelers remain sticky even when discovery encounters errors.
 func (r *LabelerRegistry) RecordError(ctx context.Context, did, msg string) error {
 	query := `
-		INSERT INTO labelers(did, endpoint, last_error, source, enabled, updated_at)
-		VALUES (?, '', ?, 'firehose', 0, ?)
+		INSERT INTO labelers(did, endpoint, last_error, source, enabled, observed_seq, updated_at)
+		VALUES (?, '', ?, 'firehose', 0, (SELECT COALESCE(MAX(observed_seq), 0) + 1 FROM labelers), ?)
 		ON CONFLICT(did) DO UPDATE SET
 			last_error = excluded.last_error,
 			updated_at = excluded.updated_at

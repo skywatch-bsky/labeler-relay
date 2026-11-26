@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS labelers (
     require_sig      INTEGER,
     last_upstream_seq INTEGER,
     last_error       TEXT,
+    observed_seq     INTEGER, -- first-observation sequence (minted at first insert; backfilled by the migrate step in store.go)
     updated_at       INTEGER NOT NULL -- unix SECONDS (unlike events.ingest_ts, which is milliseconds)
 );
 

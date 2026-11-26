@@ -25,13 +25,14 @@ const (
 
 // labelerView is the public projection of a registry labeler row.
 // last_error, require_sig, and updated_at are deliberately excluded.
-// last_upstream_seq is omitted for labelers that have never ingested.
+// last_upstream_seq is always emitted: null for labelers that have never
+// ingested, numeric otherwise.
 type labelerView struct {
 	DID             string `json:"did"`
 	Endpoint        string `json:"endpoint"`
 	Source          string `json:"source"`
 	Enabled         bool   `json:"enabled"`
-	LastUpstreamSeq *int64 `json:"last_upstream_seq,omitempty"`
+	LastUpstreamSeq *int64 `json:"last_upstream_seq"`
 }
 
 // newLabelerView projects a registry row to its public view.
@@ -61,17 +62,19 @@ func writeXRPCError(w http.ResponseWriter, status int, name, msg string) {
 }
 
 // getLabelersResponse is the JSON body returned by HandleGetLabelers.
-// Cursor is present only when further pages exist.
+// Cursor (an observed_seq value) is present only when further pages exist;
+// observed_seq values start at 1, so 0 reliably means "absent" under omitempty.
 type getLabelersResponse struct {
 	Labelers []labelerView `json:"labelers"`
-	Cursor   string        `json:"cursor,omitempty"`
+	Cursor   int64         `json:"cursor,omitempty"`
 }
 
 // HandleGetLabelers serves GET /xrpc/community.labeler.sync.getLabelers.
 //
 // Params: limit (integer, default 50, rejected outside 1-100), cursor (the
-// did of the last item of the previous page; keyset pagination over the
-// DID-ordered list), enabled (literal true/false filter; absent returns all).
+// observed_seq of the last item of the previous page; keyset pagination over
+// the observed-ordered list), enabled (literal true/false filter; absent
+// returns all).
 func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -84,6 +87,18 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit = int(parsed)
+	}
+
+	var cursor int64
+	hasCursor := false
+	if raw := query.Get("cursor"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeXRPCError(w, http.StatusBadRequest, "InvalidRequest", "cursor must be a non-negative integer")
+			return
+		}
+		cursor = parsed
+		hasCursor = true
 	}
 
 	var enabledFilter *bool
@@ -110,8 +125,8 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// List returns rows in ascending DID order; apply the enabled filter in
-	// memory to keep a single read path.
+	// List returns rows in ascending observed_seq order (first-observed
+	// first); apply the enabled filter in memory to keep a single read path.
 	filtered := make([]store.Labeler, 0, len(labelers))
 	for _, l := range labelers {
 		if enabledFilter == nil || l.Enabled == *enabledFilter {
@@ -119,11 +134,13 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Keyset pagination: skip rows at or before the cursor DID, then take one
-	// page. Unknown or pruned DIDs degrade to the first page past the cursor.
+	// Keyset pagination: skip rows at or before the cursor observed_seq, then
+	// take one page. A cursor past the current maximum (or past a range whose
+	// rows were later disabled by the filter) yields an empty or partial page
+	// with no cursor — a clean end-of-walk, never an error.
 	start := 0
-	if cursor := query.Get("cursor"); cursor != "" {
-		for start < len(filtered) && filtered[start].DID <= cursor {
+	if hasCursor {
+		for start < len(filtered) && filtered[start].ObservedSeq <= cursor {
 			start++
 		}
 	}
@@ -139,7 +156,9 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 
 	resp := getLabelersResponse{Labelers: views}
 	if end < len(filtered) {
-		resp.Cursor = views[len(views)-1].DID
+		// labelerView does not serialize observed_seq, so the cursor value
+		// comes from the store rows, not the views.
+		resp.Cursor = filtered[end-1].ObservedSeq
 	}
 
 	w.Header().Set("Content-Type", "application/json")

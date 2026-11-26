@@ -10,9 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
-	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -125,20 +124,23 @@ func labelerDIDs(body map[string]any) []string {
 	return dids
 }
 
-// TestQuery_GetLabelers_Projection verifies AC.1: every row is projected to
-// exactly did/endpoint/source/enabled (+last_upstream_seq when set);
-// last_error, require_sig, and updated_at never appear; DID order is stable.
+// TestQuery_GetLabelers_Projection verifies AC.3 and AC.6: every row is
+// projected to exactly did/endpoint/source/enabled + last_upstream_seq
+// (always present, null when never ingested); last_error, require_sig, and
+// updated_at never appear; rows arrive in observed order — the fixture's DIDs
+// are deliberately out of lexical order (did:plc:zzz observed first) so the
+// assertions distinguish observed order from DID order.
 func TestQuery_GetLabelers_Projection(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 	ctx := context.Background()
 
-	// Enabled manual labeler that has ingested.
-	seedLabeler(t, env, "did:plc:bbb", "https://bbb.example.com", "manual", true, ptrInt64(77))
-	// Disabled manual labeler, never ingested.
-	seedLabeler(t, env, "did:plc:aaa", "https://aaa.example.com", "manual", false, nil)
-	// Discovery-error row: empty endpoint, firehose source, disabled.
-	require.NoError(t, env.reg.RecordError(ctx, "did:plc:ccc", "resolution failed"))
+	// Enabled manual labeler that has ingested; observed first.
+	seedLabeler(t, env, "did:plc:zzz", "https://zzz.example.com", "manual", true, ptrInt64(77))
+	// Disabled manual labeler, never ingested; observed second.
+	seedLabeler(t, env, "did:plc:mmm", "https://mmm.example.com", "manual", false, nil)
+	// Discovery-error row: empty endpoint, firehose source, disabled; observed third.
+	require.NoError(t, env.reg.RecordError(ctx, "did:plc:aaa", "resolution failed"))
 
 	body, status := fetchLabelerList(t, env.ts.URL+"/xrpc/community.labeler.sync.getLabelers")
 	require.Equal(t, http.StatusOK, status)
@@ -153,16 +155,19 @@ func TestQuery_GetLabelers_Projection(t *testing.T) {
 	second, _ := items[1].(map[string]any)
 	third, _ := items[2].(map[string]any)
 
-	// Ascending DID order from the registry's ORDER BY did.
-	require.Equal(t, "did:plc:aaa", first["did"])
-	require.Equal(t, "did:plc:bbb", second["did"])
-	require.Equal(t, "did:plc:ccc", third["did"])
+	// Observed order from the registry's ORDER BY observed_seq.
+	require.Equal(t, "did:plc:zzz", first["did"])
+	require.Equal(t, "did:plc:mmm", second["did"])
+	require.Equal(t, "did:plc:aaa", third["did"])
 
-	require.ElementsMatch(t, baseKeys, mapKeys(first),
-		"never-subscribed row must omit last_upstream_seq")
+	// last_upstream_seq is always present: numeric when ingested, null when not.
+	require.ElementsMatch(t, append(baseKeys, "last_upstream_seq"), mapKeys(first))
+	require.Equal(t, float64(77), first["last_upstream_seq"])
 	require.ElementsMatch(t, append(baseKeys, "last_upstream_seq"), mapKeys(second))
-	require.Equal(t, float64(77), second["last_upstream_seq"])
-	require.ElementsMatch(t, baseKeys, mapKeys(third))
+	require.Nil(t, second["last_upstream_seq"],
+		"never-ingested row must emit last_upstream_seq as null")
+	require.ElementsMatch(t, append(baseKeys, "last_upstream_seq"), mapKeys(third))
+	require.Nil(t, third["last_upstream_seq"])
 
 	// Discovery-error row exposes its empty endpoint and no internal fields.
 	require.Equal(t, "", third["endpoint"])
@@ -187,7 +192,8 @@ func TestQuery_GetLabelers_EnabledFilter(t *testing.T) {
 
 	body, status := fetchLabelerList(t, base)
 	require.Equal(t, http.StatusOK, status)
-	require.Equal(t, []string{"did:plc:off1", "did:plc:on1", "did:plc:on2"}, labelerDIDs(body))
+	// Observed order = insertion order (on1, on2, off1), not DID order.
+	require.Equal(t, []string{"did:plc:on1", "did:plc:on2", "did:plc:off1"}, labelerDIDs(body))
 
 	body, status = fetchLabelerList(t, base+"?enabled=true")
 	require.Equal(t, http.StatusOK, status)
@@ -205,47 +211,85 @@ func TestQuery_GetLabelers_EnabledFilter(t *testing.T) {
 	assertXRPCError(t, resp, "InvalidRequest")
 }
 
-// TestQuery_GetLabelers_Pagination verifies AC.3: cursor walking covers every
-// row in DID order with no overlap, and the terminal page omits the cursor.
-func TestQuery_GetLabelers_Pagination(t *testing.T) {
+// TestGetLabelersCursorPaginationNumeric verifies AC.4: page N+1 contains
+// exactly the rows with observed_seq > cursor; the response cursor is the
+// numeric observed_seq of the page's last row; the final page omits cursor;
+// walking pages covers every row exactly once in observed order.
+func TestGetLabelersCursorPaginationNumeric(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 
-	for i := 1; i <= 5; i++ {
-		seedLabeler(t, env, fmt.Sprintf("did:plc:p%d", i), fmt.Sprintf("https://p%d.example.com", i), "manual", true, nil)
+	// DIDs deliberately out of lexical order; insertion order is the
+	// observed order the walk must reproduce.
+	dids := []string{"did:plc:p5", "did:plc:p3", "did:plc:p1", "did:plc:p4", "did:plc:p2"}
+	for i, did := range dids {
+		seedLabeler(t, env, did, fmt.Sprintf("https://p%d.example.com", i+1), "manual", true, nil)
 	}
 
 	seen := []string{}
-	cursor := ""
+	var cursor int64
 	for page := 0; ; page++ {
 		require.Less(t, page, 10, "pagination must terminate")
 		rawURL := env.ts.URL + "/xrpc/community.labeler.sync.getLabelers?limit=2"
-		if cursor != "" {
-			rawURL += "&cursor=" + url.QueryEscape(cursor)
+		if page > 0 {
+			rawURL += "&cursor=" + strconv.FormatInt(cursor, 10)
 		}
 		body, status := fetchLabelerList(t, rawURL)
 		require.Equal(t, http.StatusOK, status)
 
-		dids := labelerDIDs(body)
-		require.LessOrEqual(t, len(dids), 2)
-		for _, did := range dids {
+		gotDIDs := labelerDIDs(body)
+		require.LessOrEqual(t, len(gotDIDs), 2)
+		for _, did := range gotDIDs {
 			require.NotContains(t, seen, did, "pages must not overlap")
 			seen = append(seen, did)
 		}
 
-		next, _ := body["cursor"].(string)
-		if next == "" {
+		next, ok := body["cursor"].(float64)
+		if !ok {
+			// Cursorless response is the last page.
 			break
 		}
-		cursor = next
+		// The cursor is the observed_seq of the page's last row and must
+		// advance monotonically across pages.
+		require.Greater(t, int64(next), cursor, "cursor must advance monotonically")
+		cursor = int64(next)
 	}
 
 	require.Len(t, seen, 5)
-	require.True(t, sort.StringsAreSorted(seen), "pages must concatenate in DID order")
+	require.Equal(t, dids, seen,
+		"pages must concatenate in observed order, which is not DID order here")
 }
 
-// TestQuery_GetLabelers_DefaultLimit verifies AC.3's default-50 page size and
-// that the final page omits cursor while a full page carries it.
+// TestGetLabelersCursorInvalid verifies AC.4's validation bounds: non-integer
+// and negative cursors are rejected with 400 InvalidRequest; a cursor past
+// the current maximum is not an error — it yields 200 with an empty labelers
+// array and no cursor (a clean end-of-walk).
+func TestGetLabelersCursorInvalid(t *testing.T) {
+	env := newQueryTestEnv(t)
+	defer env.cleanup()
+
+	seedLabeler(t, env, "did:plc:only", "https://only.example.com", "manual", true, nil)
+
+	base := env.ts.URL + "/xrpc/community.labeler.sync.getLabelers"
+	for _, raw := range []string{"cursor=abc", "cursor=-5", "cursor=1.5"} {
+		resp, err := http.Get(base + "?" + raw)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "raw %q", raw)
+		assertXRPCError(t, resp, "InvalidRequest")
+		resp.Body.Close()
+	}
+
+	// int64 max is far past the current maximum: parseable, so accepted with
+	// an empty page and no cursor.
+	body, status := fetchLabelerList(t, base+"?cursor=9223372036854775807")
+	require.Equal(t, http.StatusOK, status)
+	require.Empty(t, labelerDIDs(body), "cursor past the maximum must yield an empty page")
+	require.NotContains(t, body, "cursor")
+}
+
+// TestQuery_GetLabelers_DefaultLimit verifies the default-50 page size and
+// that the final page omits cursor while a full page carries the numeric
+// observed_seq cursor.
 func TestQuery_GetLabelers_DefaultLimit(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
@@ -263,10 +307,12 @@ func TestQuery_GetLabelers_DefaultLimit(t *testing.T) {
 	require.Len(t, dids, 50)
 	require.Equal(t, "did:plc:q01", dids[0])
 	require.Equal(t, "did:plc:q50", dids[49])
-	cursor, _ := body["cursor"].(string)
-	require.Equal(t, "did:plc:q50", cursor)
+	cursor, ok := body["cursor"].(float64)
+	require.True(t, ok, "cursor must be a numeric observed_seq, got %T", body["cursor"])
+	require.Equal(t, float64(50), cursor,
+		"cursor must be the observed_seq of the page's last row")
 
-	body, status = fetchLabelerList(t, base+"?cursor="+url.QueryEscape(cursor))
+	body, status = fetchLabelerList(t, base+"?cursor=50")
 	require.Equal(t, http.StatusOK, status)
 	require.ElementsMatch(t, []string{"labelers"}, mapKeys(body),
 		"final page must omit cursor")
@@ -274,6 +320,37 @@ func TestQuery_GetLabelers_DefaultLimit(t *testing.T) {
 	require.Len(t, dids, 10)
 	require.Equal(t, "did:plc:q51", dids[0])
 	require.Equal(t, "did:plc:q60", dids[9])
+}
+
+// TestGetLabelerViewEmitsNullSeq verifies AC.6 for the single lookup: a
+// never-ingested labeler's getLabeler response includes the last_upstream_seq
+// key with JSON null, and an ingested labeler's is numeric.
+func TestGetLabelerViewEmitsNullSeq(t *testing.T) {
+	env := newQueryTestEnv(t)
+	defer env.cleanup()
+
+	seedLabeler(t, env, "did:plc:never", "https://never.example.com", "manual", true, nil)
+	seedLabeler(t, env, "did:plc:ingested", "https://ingested.example.com", "manual", true, ptrInt64(9))
+
+	resp, err := http.Get(env.ts.URL + "/xrpc/community.labeler.sync.getLabeler?did=did:plc:never")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Contains(t, body, "last_upstream_seq",
+		"the last_upstream_seq key must always be present")
+	require.Nil(t, body["last_upstream_seq"],
+		"a never-ingested labeler must emit last_upstream_seq as null")
+	require.ElementsMatch(t,
+		[]string{"did", "endpoint", "source", "enabled", "last_upstream_seq"}, mapKeys(body))
+
+	resp2, err := http.Get(env.ts.URL + "/xrpc/community.labeler.sync.getLabeler?did=did:plc:ingested")
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	var numeric map[string]any
+	require.NoError(t, json.NewDecoder(resp2.Body).Decode(&numeric))
+	require.Equal(t, float64(9), numeric["last_upstream_seq"])
 }
 
 // TestQuery_GetLabelers_InvalidLimit verifies AC.3's rejection bounds.
@@ -405,12 +482,15 @@ func TestQuery_LexiconValues(t *testing.T) {
 	require.Equal(t, "", single["endpoint"])
 }
 
-// TestQuery_Lexicons verifies AC.8: the lexicon files exist, parse as JSON,
-// and declare params/output consistent with the handlers' actual output.
-func TestQuery_Lexicons(t *testing.T) {
+// TestQueryLexiconContract verifies AC.5: the lexicon files exist, parse as
+// JSON, and declare the integer cursor (param and response) and the
+// required+nullable last_upstream_seq consistent with the handlers' actual
+// output.
+func TestQueryLexiconContract(t *testing.T) {
 	type schemaNode struct {
 		Type        string                `json:"type"`
 		Required    []string              `json:"required"`
+		Nullable    []string              `json:"nullable"`
 		Properties  map[string]schemaNode `json:"properties"`
 		Items       *schemaNode           `json:"items"`
 		Ref         string                `json:"ref"`
@@ -469,7 +549,8 @@ func TestQuery_Lexicons(t *testing.T) {
 
 	cursor, ok := listMain.Parameters.Properties["cursor"]
 	require.True(t, ok, "cursor param must exist")
-	require.Equal(t, "string", cursor.Type)
+	require.Equal(t, "integer", cursor.Type,
+		"the cursor param is a deliberately non-opaque integer (observed_seq)")
 
 	enabled, ok := listMain.Parameters.Properties["enabled"]
 	require.True(t, ok, "enabled param must exist")
@@ -485,6 +566,11 @@ func TestQuery_Lexicons(t *testing.T) {
 	require.NotNil(t, labelersProp.Items)
 	require.Equal(t, "community.labeler.sync.defs#labelerView", labelersProp.Items.Ref)
 
+	outCursor, ok := listMain.Output.Schema.Properties["cursor"]
+	require.True(t, ok, "response cursor property must exist")
+	require.Equal(t, "integer", outCursor.Type,
+		"the response cursor is the numeric observed_seq of the page's last row")
+
 	// The shared labelerView lives in the defs document, not in either
 	// query lexicon.
 	defsID, sharedDefs := readLexicon("../../lexicons/community/labeler/sync/defs.json")
@@ -493,8 +579,11 @@ func TestQuery_Lexicons(t *testing.T) {
 	var view schemaNode
 	require.NoError(t, json.Unmarshal(sharedDefs["labelerView"], &view))
 	require.Equal(t, "object", view.Type)
-	require.ElementsMatch(t, []string{"did", "endpoint", "source", "enabled"}, view.Required,
+	require.ElementsMatch(t, []string{"did", "endpoint", "source", "enabled", "last_upstream_seq"}, view.Required,
 		"labelerView required fields must match the handler's always-emitted keys")
+	require.NotNil(t, view.Nullable, "last_upstream_seq must be declared nullable")
+	require.ElementsMatch(t, []string{"last_upstream_seq"}, view.Nullable,
+		"last_upstream_seq is emitted as null for labelers that have never been observed")
 	for _, key := range []string{"did", "endpoint", "source", "enabled", "last_upstream_seq"} {
 		_, ok := view.Properties[key]
 		require.True(t, ok, "labelerView must declare %s", key)

@@ -13,10 +13,10 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
   - FutureCursor returns an error frame; OutdatedCursor sends #info then resumes from floor
   - Hub.Broadcast is non-blocking: called under persist mutex, must return immediately
   - XRPC frames follow header+body CBOR concatenation (op:1 for messages, op:-1 for errors)
-  - Query responses are JSON projections limited to did, endpoint, source, enabled, last_upstream_seq (omitted when null); last_error, require_sig, and updated_at never appear
-  - Query pagination is keyset over the DID-ordered list (cursor = last did of the previous page); limit outside 1-100 and nonempty enabled values other than true/false are rejected with 400, not clamped; absent or empty enabled applies no filter
+  - Query responses are JSON projections limited to did, endpoint, source, enabled, last_upstream_seq (always present; JSON null when the labeler has never ingested); last_error, require_sig, and updated_at never appear
+  - Query pagination is keyset over the observed_seq-ordered list (cursor = the observed_seq of the last row of the previous page); limit outside 1-100, a non-integer or negative cursor, and nonempty enabled values other than true/false are rejected with 400, not clamped; absent or empty enabled applies no filter; a cursor past the current maximum yields HTTP 200 with an empty labelers array and no cursor
   - The query rate limiter keys on the connection peer address (RemoteAddr) unless the peer is inside the trusted proxy CIDRs (LABELER_RELAY_TRUSTED_PROXIES, loopback default): a trusted peer keys on the rightmost X-Forwarded-For hop outside the trusted set. An absent header, an all-trusted chain, or a malformed/zoned entry encountered during the walk falls back to the normalized peer; an unparseable RemoteAddr falls back to its raw string without consulting X-Forwarded-For. The tracked-IP map is bounded at 65536 entries with O(1) LRU eviction (the evicted entry is an idle one whenever any entry is idle)
-- **Expects**: Hub.Broadcast wired as LabelPersist's broadcaster. Persist provides valid playback and head/floor. Registry provides DID-ordered lists.
+- **Expects**: Hub.Broadcast wired as LabelPersist's broadcaster. Persist provides valid playback and head/floor. Registry provides observed_seq-ordered lists.
 
 ## Dependencies
 - **Uses**: store (LabelPersist, LabelerRegistry, Labeler, LiveEvent, CursorState), gorilla/websocket, RussellLuo/slidingwindow, indigo atproto/syntax (ParseDID), prometheus (MetricsHandler only)
@@ -47,7 +47,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - `frames.go` - XRPC frame encoding (FrameHeader, WriteMessage, WriteError)
 - `health.go` - /_health JSON endpoint
 - `metrics_endpoint.go` - /metrics Prometheus handler
-- `query.go` - HandleGetLabelers/HandleGetLabeler: public projection, keyset pagination, writeXRPCError
+- `query.go` - HandleGetLabelers/HandleGetLabeler: public projection, keyset pagination over observed_seq, writeXRPCError
 - `ratelimit.go` - QueryRateLimiter: per-IP two-tier sliding windows, Middleware, eviction
 - `clientip.go` - resolveClientIP: trusted-proxy-aware client-IP resolver for rate-limit keying
 
@@ -57,4 +57,4 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 - X-Forwarded-For is honored only from trusted TCP peers. Configure only actual proxy ranges, and ensure those proxies append the observed upstream address or overwrite XFF with a verified chain; a trusted proxy that forwards an arbitrary client-supplied header unchanged permits spoofed bucket keys. Each intervening proxy must be trusted to recover the original client; otherwise the nearest untrusted hop is the key. Missing headers, fully trusted chains, and invalid entries encountered during traversal share the peer's bucket.
 - `clientip_test.go` covers trust boundaries, multi-line/multi-hop chains, fallbacks, and address normalization; `ratelimit_test.go` covers middleware keying, including malformed RemoteAddr. Route tests cover separate client budgets behind a trusted proxy.
 - Query error bodies use the XRPC shape `{"error", "message"}`, which differs from the admin package's single-key `{"error"}` shape. Do not unify them blindly; XRPC clients expect both keys.
-- Query responses are snake_case (`last_upstream_seq`) like /_health — a deliberate deviation from atproto's camelCase lexicon convention, matching the issue's field list. Stream frames remain camelCase.
+- Query responses are snake_case (`last_upstream_seq`) like /_health, and the getLabelers pagination cursor is a plain integer (the row's `observed_seq`) rather than atproto's opaque string — both deliberate deviations from atproto conventions, matching the issue's field list. Stream frames remain camelCase.
