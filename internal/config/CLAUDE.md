@@ -1,6 +1,6 @@
 # Config
 
-Last verified: 2026-06-13
+Last verified: 2026-11-26
 
 ## Purpose
 Centralizes environment-variable-based configuration loading and validation. Ensures env reading happens only at the app boundary, never in library packages.
@@ -9,9 +9,9 @@ Centralizes environment-variable-based configuration loading and validation. Ens
 - **Exposes**: `Config` struct, `Load() (Config, error)`
 - **Guarantees**:
   - All env vars prefixed `LABELER_RELAY_`
-  - Validation rejects empty admin token, non-positive retention/rate-limit/buf-size values, and buf-size > 65536
+  - Validation rejects empty admin token, non-positive retention/rate-limit/buf-size values (including both query rate limits), and buf-size > 65536
   - Duration parsing supports Go's format plus "Nd" shorthand for days
-  - Sensible defaults: `:8080`, `labeler-relay.db`, 14d retention, 500/s + 100k/h rate limits, sig required
+  - Sensible defaults: `:8080`, `labeler-relay.db`, 14d retention, 500/s + 100k/h upstream rate limits, 10/s + 1200/h query rate limits, sig required
 - **Expects**: `LABELER_RELAY_ADMIN_TOKEN` must be set (no default)
 
 ## Environment Variables
@@ -23,8 +23,11 @@ Centralizes environment-variable-based configuration loading and validation. Ens
 | LABELER_RELAY_ADMIN_TOKEN | (required) | Bearer token for /admin/ |
 | LABELER_RELAY_RETENTION_WINDOW | 336h (14d) | Supports "Nd" shorthand |
 | LABELER_RELAY_REQUIRE_SIG | true | Global default sig policy |
+| LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED | true | Enable newly discovered labelers |
 | LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC | 500 | Per-labeler |
 | LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR | 100000 | Per-labeler |
+| LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC | 10 | Per-client-IP, public query endpoints |
+| LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR | 1200 | Per-client-IP, public query endpoints |
 | LABELER_RELAY_SUBSCRIBER_BUF_SIZE | 512 | Per-subscriber event buffer (max 65536) |
 
 ## Key Files

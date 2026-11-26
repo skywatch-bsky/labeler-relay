@@ -28,6 +28,9 @@ type Config struct {
 	AutoSubscribeDiscovered bool
 	RequireSig              bool
 	UpstreamRateLimit       RateLimit
+	// QueryRateLimit bounds public per-client-IP query endpoint requests
+	// (two-tier sliding window: per-second and per-hour).
+	QueryRateLimit          RateLimit
 	SubscriberBufSize       int
 }
 
@@ -78,6 +81,16 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("failed to load config: %w", err)
 	}
 
+	cfg.QueryRateLimit.PerSec, err = parseIntEnv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC", "query_rate_limit.per_sec", 10)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cfg.QueryRateLimit.PerHour, err = parseIntEnv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR", "query_rate_limit.per_hour", 1200)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to load config: %w", err)
+	}
+
 	if err := validate(cfg); err != nil {
 		return Config{}, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -105,6 +118,12 @@ func validate(cfg Config) error {
 	}
 	if cfg.SubscriberBufSize > 65536 {
 		return fmt.Errorf("subscriber_buf_size must be at most 65536, got %d", cfg.SubscriberBufSize)
+	}
+	if cfg.QueryRateLimit.PerSec <= 0 {
+		return fmt.Errorf("query_rate_limit.per_sec must be positive, got %d", cfg.QueryRateLimit.PerSec)
+	}
+	if cfg.QueryRateLimit.PerHour <= 0 {
+		return fmt.Errorf("query_rate_limit.per_hour must be positive, got %d", cfg.QueryRateLimit.PerHour)
 	}
 	return nil
 }

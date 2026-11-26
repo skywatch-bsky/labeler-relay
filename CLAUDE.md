@@ -1,6 +1,6 @@
 # labeler-relay
 
-Last verified: 2026-10-20
+Last verified: 2026-11-26
 
 ## Tech Stack
 - Language: Go 1.27.3 (enforced minimum in go.mod; security floor)
@@ -21,12 +21,12 @@ Last verified: 2026-10-20
 ## Project Structure
 - `cmd/labeler-relay/` - Entry point; wires all components via errgroup
 - `api/community/` - Output lexicon Go types + CBOR codegen (do not hand-edit `cbor_gen.go`)
-- `lexicons/` - Lexicon JSON schema for `community.labeler.sync.subscribeLabelers`
+- `lexicons/` - Lexicon JSON schemas for `community.labeler.sync.subscribeLabelers` and the public query endpoints (`community.labeler.sync.getLabelers`/`getLabeler`)
 - `gen/` - CBOR codegen driver (run via `make cborgen`)
 - `internal/store/` - SQLite store, LabelPersist (seq minting + broadcast), LabelerRegistry, PruneJob
 - `internal/slurper/` - Per-labeler upstream subscriptions with redial, rate limiting, sig policy
 - `internal/firehose/` - Firehose watcher for labeler auto-discovery, DID resolution
-- `internal/server/` - Output WebSocket server: Hub fan-out, backfill-to-live seam, XRPC framing
+- `internal/server/` - Output WebSocket server: Hub fan-out, backfill-to-live seam, XRPC framing; public query endpoints (`getLabelers`/`getLabeler`) with per-client-IP rate limiting
 - `internal/admin/` - Bearer-auth HTTP CRUD for labeler registry management
 - `internal/config/` - Env-based config loading with validation
 - `internal/metrics/` - Prometheus metric definitions

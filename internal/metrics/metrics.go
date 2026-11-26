@@ -64,6 +64,16 @@ var (
 		},
 		[]string{"labeler_did"},
 	)
+
+	// QueryRateLimitedTotal counts requests rejected by the public query
+	// endpoint rate limiter, partitioned by endpoint name.
+	QueryRateLimitedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "labeler_relay_query_rate_limited_total",
+			Help: "Requests rejected by the public query endpoint rate limiter, by endpoint.",
+		},
+		[]string{"endpoint"},
+	)
 )
 
 // Register registers all metrics with the given Prometheus registry.
@@ -78,6 +88,7 @@ func Register(reg *prometheus.Registry) error {
 		HeadSeq,
 		RetentionFloorGauge,
 		Throttled,
+		QueryRateLimitedTotal,
 	}
 	for _, c := range collectors {
 		if err := reg.Register(c); err != nil {

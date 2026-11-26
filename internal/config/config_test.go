@@ -42,6 +42,8 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("LABELER_RELAY_REQUIRE_SIG", "false")
 	t.Setenv("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC", "100")
 	t.Setenv("LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR", "50000")
+	t.Setenv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC", "25")
+	t.Setenv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR", "2400")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -55,6 +57,8 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	require.False(t, cfg.RequireSig)
 	require.Equal(t, 100, cfg.UpstreamRateLimit.PerSec)
 	require.Equal(t, 50000, cfg.UpstreamRateLimit.PerHour)
+	require.Equal(t, 25, cfg.QueryRateLimit.PerSec)
+	require.Equal(t, 2400, cfg.QueryRateLimit.PerHour)
 }
 
 // TestLoad_ValidationErrors verifies that invalid configs produce descriptive errors.
@@ -164,6 +168,58 @@ func TestLoad_RetentionWindowFormats(t *testing.T) {
 	}
 }
 
+// TestConfig_QueryRateLimitDefaults verifies AC.7: the public query endpoint
+// rate limit env vars default to 10 per second and 1200 per hour.
+func TestConfig_QueryRateLimitDefaults(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "test-token")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, 10, cfg.QueryRateLimit.PerSec)
+	require.Equal(t, 1200, cfg.QueryRateLimit.PerHour)
+}
+
+// TestConfig_QueryRateLimitInvalid verifies AC.7: invalid values fail startup
+// with lowercase-fragment errors naming the offending field.
+func TestConfig_QueryRateLimitInvalid(t *testing.T) {
+	t.Run("negative query per_sec", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC", "-1")
+		_, err := config.Load()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "query_rate_limit.per_sec")
+	})
+
+	t.Run("zero query per_hour", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR", "0")
+		_, err := config.Load()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "query_rate_limit.per_hour")
+	})
+
+	t.Run("non-integer query per_sec", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC", "ten")
+		_, err := config.Load()
+		require.Error(t, err, "malformed int must fail loud, not fall back to default")
+		require.Contains(t, err.Error(), "query_rate_limit.per_sec")
+	})
+
+	t.Run("non-integer query per_hour", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("LABELER_RELAY_ADMIN_TOKEN", "tok")
+		t.Setenv("LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR", "1.2k")
+		_, err := config.Load()
+		require.Error(t, err, "malformed int must fail loud, not fall back to default")
+		require.Contains(t, err.Error(), "query_rate_limit.per_hour")
+	})
+}
+
 // clearEnv unsets all LABELER_RELAY_* env vars for the duration of the test
 // by setting them to empty strings. t.Setenv restores on cleanup; Load treats
 // empty strings as "not set" and applies defaults.
@@ -179,6 +235,8 @@ func clearEnv(t *testing.T) {
 		"LABELER_RELAY_REQUIRE_SIG",
 		"LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_SEC",
 		"LABELER_RELAY_UPSTREAM_RATE_LIMIT_PER_HOUR",
+		"LABELER_RELAY_QUERY_RATE_LIMIT_PER_SEC",
+		"LABELER_RELAY_QUERY_RATE_LIMIT_PER_HOUR",
 	} {
 		t.Setenv(v, "")
 	}

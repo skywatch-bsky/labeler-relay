@@ -1,0 +1,80 @@
+{
+  "lexicon": 1,
+  "id": "community.labeler.sync.getLabelers",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List the labelers registered on this relay, in ascending DID order. Public endpoint, rate limited per client IP.",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Maximum number of labelers to return. Values outside 1-100 are rejected with InvalidRequest, not clamped."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor: the did of the last labeler on the previous page. Pass the cursor from a response back to fetch the next page; a response without a cursor is the last page."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Filter by registry enabled state. When absent, all labelers are returned. Only the literal strings true and false are accepted."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["labelers"],
+          "properties": {
+            "labelers": {
+              "type": "array",
+              "description": "Registered labelers in ascending DID order. Empty array when nothing matches.",
+              "items": {
+                "type": "ref",
+                "ref": "#labelerView"
+              }
+            },
+            "cursor": {
+              "type": "string",
+              "description": "The did of the last labeler on this page. Present only when further pages exist."
+            }
+          }
+        }
+      }
+    },
+    "labelerView": {
+      "type": "object",
+      "description": "Public projection of a registry labeler row. Internal fields (last_error, require_sig, updated_at) are deliberately excluded.",
+      "required": ["did", "endpoint", "source", "enabled"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the labeler."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Labeler service endpoint URL. Stays empty until discovery resolves the endpoint for the labeler."
+        },
+        "source": {
+          "type": "string",
+          "knownValues": ["firehose", "manual"],
+          "description": "How the labeler was registered: discovered from the firehose, or added manually via the admin API."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the relay subscribes to this labeler's upstream stream."
+        },
+        "last_upstream_seq": {
+          "type": "integer",
+          "description": "Sequence number last ingested from the labeler's upstream stream. Absent when the labeler has never ingested."
+        }
+      }
+    }
+  }
+}

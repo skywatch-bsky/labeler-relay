@@ -1,6 +1,6 @@
 # Store
 
-Last verified: 2026-06-02
+Last verified: 2026-11-26
 
 ## Purpose
 Single source of truth for event persistence and labeler registration. Owns the SQLite database, global relay sequence minting, and retention pruning.
@@ -18,7 +18,7 @@ Single source of truth for event persistence and labeler registration. Owns the 
 
 ## Dependencies
 - **Uses**: modernc.org/sqlite, indigo types (LabelDefs_Label, LabelerService, persist.EventPersistence)
-- **Used by**: slurper (ingest + cursor), firehose (ingest + registry + meta), server (playback + hub broadcast), admin (registry CRUD), main.go (wiring)
+- **Used by**: slurper (ingest + cursor), firehose (ingest + registry + meta), server (playback + hub broadcast + registry reads), admin (registry CRUD), main.go (wiring)
 - **Boundary**: Must not import metrics, slurper, server, admin, or firehose
 
 ## Key Decisions

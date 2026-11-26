@@ -117,12 +117,7 @@ func run(ctx context.Context) error {
 		metrics.ConsumerCount.Dec()
 	})
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/xrpc/community.labeler.sync.subscribeLabelers", srv.HandleSubscribeLabelers)
-	mux.HandleFunc("/_health", srv.HandleHealth)
-	mux.Handle("/metrics", server.MetricsHandler(reg))
-
-	mux.Handle("/admin/", adminAPI.Routes())
+	mux := buildMux(srv, cfg.QueryRateLimit.PerSec, cfg.QueryRateLimit.PerHour, reg, adminAPI)
 
 	httpServer := &http.Server{
 		Addr:    cfg.ListenAddr,

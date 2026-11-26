@@ -13,6 +13,7 @@ require (
 	github.com/ipld/go-car v0.6.1-0.20230509095817-92d28eb23ba4
 	github.com/multiformats/go-multihash v0.2.3
 	github.com/prometheus/client_golang v1.17.0
+	github.com/prometheus/client_model v0.5.0
 	github.com/stretchr/testify v1.10.0
 	github.com/whyrusleeping/cbor-gen v0.2.1-0.20241030202151-b7a6831be65e
 	golang.org/x/sync v0.20.0
@@ -62,7 +63,6 @@ require (
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/polydawn/refmt v0.89.1-0.20221221234430-40501e09de1f // indirect
-	github.com/prometheus/client_model v0.5.0 // indirect
 	github.com/prometheus/common v0.45.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
