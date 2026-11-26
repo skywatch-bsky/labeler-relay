@@ -179,8 +179,9 @@ The JSON below illustrates decoded bodies, not JSON messages sent over the socke
 }
 ```
 
-If the cursor is below `retention_floor - 1`, the relay sends this message and resumes at the oldest retained event.
+When retained events exist, a cursor below `retention_floor - 1` receives this message, and playback resumes at the oldest retained event.
 A cursor equal to `retention_floor - 1` starts there without an info message.
+On an empty store, every cursor is accepted and there is nothing to backfill.
 
 Error bodies contain `error` and `message`. The relay closes the connection after `InvalidRequest` for a malformed cursor or `FutureCursor` for a cursor above the head.
 It attempts to send `ConsumerTooSlow` before closing a consumer whose buffer overflows. Socket write failures can close the connection without an error frame.
