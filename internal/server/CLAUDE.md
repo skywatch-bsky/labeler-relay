@@ -15,7 +15,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
   - XRPC frames follow header+body CBOR concatenation (op:1 for messages, op:-1 for errors)
   - Query responses are JSON projections limited to did, endpoint, source, enabled, last_upstream_seq (omitted when null); last_error, require_sig, and updated_at never appear
   - Query pagination is keyset over the DID-ordered list (cursor = last did of the previous page); limit outside 1-100 and nonempty enabled values other than true/false are rejected with 400, not clamped; absent or empty enabled applies no filter
-  - The query rate limiter keys on the connection peer address (RemoteAddr), never X-Forwarded-For, and bounds its tracked-IP map at 65536 entries with idle eviction
+  - The query rate limiter keys on the connection peer address (RemoteAddr), never X-Forwarded-For, and bounds its tracked-IP map at 65536 entries with heap-ordered idle/oldest eviction (O(log n) admission at cap)
 - **Expects**: Hub.Broadcast wired as LabelPersist's broadcaster. Persist provides valid playback and head/floor. Registry provides DID-ordered lists.
 
 ## Dependencies

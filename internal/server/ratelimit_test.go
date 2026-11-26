@@ -106,6 +106,25 @@ func TestRateLimiter_IdleEviction(t *testing.T) {
 	require.Len(t, q.windows, 1)
 }
 
+func TestRateLimiter_StaleHeapEntryNotEvicted(t *testing.T) {
+	// An IP touched after its eviction-heap entry was pushed must not be
+	// evicted as "oldest": the stale heap key is replaced before eviction
+	// decides. This pins the heap-based eviction order.
+	q := newQueryRateLimiter(10, 1000, 2)
+	defer q.Close()
+
+	require.True(t, q.allowAt("10.9.0.1", rlBase))
+	require.True(t, q.allowAt("10.9.0.1", rlBase.Add(10*time.Second)), "ip1 touched again: its heap key goes stale")
+	require.True(t, q.allowAt("10.9.0.2", rlBase.Add(5*time.Second)))
+
+	// A third IP hits the cap. The truly oldest IP (10.9.0.2, seen at +5s)
+	// must be evicted, not 10.9.0.1 whose heap key still says +0s.
+	require.True(t, q.allowAt("10.9.0.3", rlBase.Add(12*time.Second)))
+	require.Contains(t, q.windows, "10.9.0.1")
+	require.Contains(t, q.windows, "10.9.0.3")
+	require.NotContains(t, q.windows, "10.9.0.2")
+}
+
 func TestQuery_RateLimited_Response(t *testing.T) {
 	q := newQueryRateLimiter(1, 1000, 4)
 	defer q.Close()
