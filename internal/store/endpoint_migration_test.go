@@ -3,6 +3,8 @@ package store
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/scarndp/labeler-relay/internal/labelerendpoint"
 )
 
 func TestEndpointMigrationRollsBack(t *testing.T) {
@@ -42,6 +44,7 @@ func TestEndpointMigration(t *testing.T) {
 		{"b", "http://b.example:8443/xrpc/com.atproto.label.subscribeLabels", "b.example:8443"},
 		{"empty", "", ""}, {"bare", "bare.example", "bare.example"},
 		{"invalid", "https:///", "https:///"},
+		{"scoped-ipv6", "https://[fe80::1%25en0]:8443/old?token=x", "[fe80::1%25en0]:8443"},
 	}
 	for _, tt := range cases {
 		if _, err := s.DB().Exec("INSERT INTO labelers (did, endpoint, source, enabled, updated_at, observed_seq) VALUES (?, ?, 'manual', 1, 123, (SELECT COALESCE(MAX(observed_seq), 0)+1 FROM labelers))", tt.did, tt.endpoint); err != nil {
@@ -64,6 +67,14 @@ func TestEndpointMigration(t *testing.T) {
 			}
 			if endpoint != tt.want || updatedAt != 123 {
 				t.Errorf("%s: endpoint=%q updated_at=%d, want %q and 123", tt.did, endpoint, updatedAt, tt.want)
+			}
+			if tt.did == "scoped-ipv6" {
+				cursor := int64(42)
+				got, err := labelerendpoint.SubscribeURL(endpoint, &cursor)
+				want := "wss://[fe80::1%25en0]:8443/xrpc/com.atproto.label.subscribeLabels?cursor=42"
+				if err != nil || got != want {
+					t.Errorf("migrated endpoint SubscribeURL = %q, %v; want %q", got, err, want)
+				}
 			}
 		}
 		if err := s.Close(); err != nil {

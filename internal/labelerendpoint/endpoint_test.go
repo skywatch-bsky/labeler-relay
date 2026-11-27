@@ -16,6 +16,9 @@ func TestHost(t *testing.T) {
 		{"[::1]:8443", "[::1]:8443", false},
 		{"a.example/path?query=x", "a.example", false},
 		{"https://[::1]:8443/", "[::1]:8443", false},
+		{"https://[fe80::1%25en0]:8443/path?token=x", "[fe80::1%25en0]:8443", false},
+		{"[fe80::1%25en0]:8443", "[fe80::1%25en0]:8443", false},
+		{"https://[fe80::1%25en%200]/", "[fe80::1%25en%200]", false},
 		{"", "", true}, {"https:///", "", true}, {"/path", "", true},
 		{"not a host", "", true}, {"https://host:bad", "", true},
 	} {
@@ -46,6 +49,9 @@ func TestSubscribeURL(t *testing.T) {
 		{"http://a.example:8443/old?token=x", &positive, "wss://a.example:8443/xrpc/com.atproto.label.subscribeLabels?cursor=42", false},
 		{"https://a.example", &zero, "wss://a.example/xrpc/com.atproto.label.subscribeLabels?cursor=0", false},
 		{"custom://a.example", &negative, "wss://a.example/xrpc/com.atproto.label.subscribeLabels?cursor=-1", false},
+		{"[fe80::1%25en0]:8443", &positive, "wss://[fe80::1%25en0]:8443/xrpc/com.atproto.label.subscribeLabels?cursor=42", false},
+		{"http://[fe80::1%25en0]:8443/old?token=x", nil, "wss://[fe80::1%25en0]:8443/xrpc/com.atproto.label.subscribeLabels", false},
+		{"[fe80::1%25en%200]", nil, "wss://[fe80::1%25en%200]/xrpc/com.atproto.label.subscribeLabels", false},
 		{"", nil, "", true},
 	} {
 		got, err := SubscribeURL(tt.endpoint, tt.cursor)

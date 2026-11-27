@@ -11,7 +11,7 @@ import (
 
 const SubscribeLabelsPath = "/xrpc/com.atproto.label.subscribeLabels"
 
-// Host extracts the host and optional port, without a scheme, path, or query.
+// Host extracts the URL-escaped host and optional port, without a scheme, path, or query.
 func Host(serviceEndpoint string) (string, error) {
 	u, err := url.Parse(serviceEndpoint)
 	if (err != nil || u.Host == "") && !strings.Contains(serviceEndpoint, "://") {
@@ -23,7 +23,9 @@ func Host(serviceEndpoint string) (string, error) {
 	if u.Hostname() == "" {
 		return "", fmt.Errorf("labeler endpoint has no host")
 	}
-	return u.Host, nil
+	// URL.Host is decoded; serialize it to preserve IPv6 zone escapes on reparse.
+	hostURL := url.URL{Host: u.Host}
+	return strings.TrimPrefix(hostURL.String(), "//"), nil
 }
 
 // SubscribeURL builds a secure WebSocket URL with an optional resume cursor.
@@ -32,7 +34,12 @@ func SubscribeURL(endpoint string, cursor *int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	u := url.URL{Scheme: "wss", Host: host, Path: SubscribeLabelsPath}
+	u, err := url.Parse("//" + host)
+	if err != nil {
+		return "", fmt.Errorf("invalid labeler host: %w", err)
+	}
+	u.Scheme = "wss"
+	u.Path = SubscribeLabelsPath
 	if cursor != nil {
 		u.RawQuery = "cursor=" + strconv.FormatInt(*cursor, 10)
 	}
