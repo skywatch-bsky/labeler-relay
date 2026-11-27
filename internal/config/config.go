@@ -4,7 +4,9 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -133,6 +135,34 @@ func validate(cfg Config) error {
 	}
 	if cfg.QueryRateLimit.PerHour <= 0 {
 		return fmt.Errorf("query_rate_limit.per_hour must be positive, got %d", cfg.QueryRateLimit.PerHour)
+	}
+	// The watcher dials this URL as given, so anything it cannot dial must
+	// fail here rather than on every dial after startup.
+	u, err := url.Parse(cfg.FirehoseURL)
+	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("firehose_url must be a ws:// or wss:// URL with a hostname and no userinfo")
+	}
+	authority := u.Host
+	if u.Port() == "" && !strings.HasSuffix(authority, ":") {
+		authority += ":80"
+	}
+	if _, _, err := net.SplitHostPort(authority); err != nil {
+		return fmt.Errorf("firehose_url must have a valid hostname or bracketed IPv6 address and optional port")
+	}
+	if strings.HasPrefix(u.Host, "[") {
+		addr, err := netip.ParseAddr(u.Hostname())
+		if err != nil || !addr.Is6() {
+			return fmt.Errorf("firehose_url bracketed hostname must be an IPv6 address")
+		}
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("firehose_url port must be an integer between 1 and 65535")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
+			return fmt.Errorf("firehose_url port must be an integer between 1 and 65535")
+		}
 	}
 	return nil
 }

@@ -100,7 +100,7 @@ All configuration uses environment variables with the `LABELER_RELAY_` prefix.
 |----------|---------|-------------|
 | `LABELER_RELAY_DB_PATH` | `labeler-relay.db` | SQLite database path. |
 | `LABELER_RELAY_LISTEN_ADDR` | `:8080` | HTTP listen address. The default listens on all interfaces. |
-| `LABELER_RELAY_FIREHOSE_URL` | `wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos` | AT Protocol firehose URL. |
+| `LABELER_RELAY_FIREHOSE_URL` | `wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos` | AT Protocol firehose URL. Must use `ws://` or `wss://`; any other value is refused at startup. |
 | `LABELER_RELAY_ADMIN_TOKEN` | Required | Bearer token for the `/admin/` API. Must not be empty. |
 | `LABELER_RELAY_RETENTION_WINDOW` | `336h` (14 days) | Event retention period. Accepts Go durations or whole days such as `7d`. Must be positive. |
 | `LABELER_RELAY_REQUIRE_SIG` | `true` | Reject labels without signatures. Supports per-labeler overrides through the admin API. |

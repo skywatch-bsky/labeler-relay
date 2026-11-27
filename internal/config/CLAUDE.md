@@ -1,6 +1,6 @@
 # Config
 
-Last verified: 2026-11-26
+Last verified: 2026-11-27
 
 ## Purpose
 Centralizes environment-variable-based configuration loading and validation. Ensures env reading happens only at the app boundary, never in library packages.
@@ -9,7 +9,7 @@ Centralizes environment-variable-based configuration loading and validation. Ens
 - **Exposes**: `Config` struct, `Load() (Config, error)`
 - **Guarantees**:
   - All env vars prefixed `LABELER_RELAY_`
-  - Validation rejects empty admin token, non-positive retention/rate-limit/buf-size values (including both query rate limits), and buf-size > 65536
+  - Validation rejects empty admin token, non-positive retention/rate-limit/buf-size values (including both query rate limits), buf-size > 65536, and a `LABELER_RELAY_FIREHOSE_URL` that is not a `ws://` or `wss://` URL with a host (error contains `firehose_url`)
   - `Config.TrustedProxies` is a `[]netip.Prefix`: unset `LABELER_RELAY_TRUSTED_PROXIES` defaults to loopback; explicitly empty or literal `none` yields no trusted proxies. Invalid CIDRs and IPv4-mapped IPv6 prefixes fail `Load` with an error containing `trusted_proxies`
   - Duration parsing supports Go's format plus "Nd" shorthand for days
   - Sensible defaults: `:8080`, `labeler-relay.db`, 14d retention, 500/s + 100k/h upstream rate limits, 10/s + 1200/h query rate limits, sig required
@@ -20,7 +20,7 @@ Centralizes environment-variable-based configuration loading and validation. Ens
 |----------|---------|-------|
 | LABELER_RELAY_DB_PATH | labeler-relay.db | SQLite database path |
 | LABELER_RELAY_LISTEN_ADDR | :8080 | HTTP listen address |
-| LABELER_RELAY_FIREHOSE_URL | wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos | |
+| LABELER_RELAY_FIREHOSE_URL | wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos | Must be a `ws://` or `wss://` URL; the watcher dials it as given |
 | LABELER_RELAY_ADMIN_TOKEN | (required) | Bearer token for /admin/ |
 | LABELER_RELAY_RETENTION_WINDOW | 336h (14d) | Supports "Nd" shorthand |
 | LABELER_RELAY_REQUIRE_SIG | true | Global default sig policy |
