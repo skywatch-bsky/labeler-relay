@@ -9,7 +9,6 @@ import (
 	"sort"
 
 	atproto "github.com/bluesky-social/indigo/api/atproto"
-	bsky "github.com/bluesky-social/indigo/api/bsky"
 	cid "github.com/ipfs/go-cid"
 	cbg "github.com/whyrusleeping/cbor-gen"
 	xerrors "golang.org/x/xerrors"
@@ -299,7 +298,11 @@ func (t *LabelerSyncSubscribeLabelers_Service) MarshalCBOR(w io.Writer) error {
 	}
 
 	cw := cbg.NewCborWriter(w)
-	fieldCount := 4
+	fieldCount := 5
+
+	if t.Collection == "" {
+		fieldCount--
+	}
 
 	if t.Record == nil {
 		fieldCount--
@@ -377,7 +380,7 @@ func (t *LabelerSyncSubscribeLabelers_Service) MarshalCBOR(w io.Writer) error {
 		return err
 	}
 
-	// t.Record (bsky.LabelerService) (struct)
+	// t.Record (community.RawRecord) (struct)
 	if t.Record != nil {
 
 		if len("record") > 8192 {
@@ -392,6 +395,32 @@ func (t *LabelerSyncSubscribeLabelers_Service) MarshalCBOR(w io.Writer) error {
 		}
 
 		if err := t.Record.MarshalCBOR(cw); err != nil {
+			return err
+		}
+	}
+
+	// t.Collection (string) (string)
+	if t.Collection != "" {
+
+		if len("collection") > 8192 {
+			return xerrors.Errorf("Value in field \"collection\" was too long")
+		}
+
+		if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("collection"))); err != nil {
+			return err
+		}
+		if _, err := cw.WriteString(string("collection")); err != nil {
+			return err
+		}
+
+		if len(t.Collection) > 8192 {
+			return xerrors.Errorf("Value in field t.Collection was too long")
+		}
+
+		if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(t.Collection))); err != nil {
+			return err
+		}
+		if _, err := cw.WriteString(string(t.Collection)); err != nil {
 			return err
 		}
 	}
@@ -423,7 +452,7 @@ func (t *LabelerSyncSubscribeLabelers_Service) UnmarshalCBOR(r io.Reader) (err e
 
 	n := extra
 
-	nameBuf := make([]byte, 6)
+	nameBuf := make([]byte, 10)
 	for i := uint64(0); i < n; i++ {
 		nameLen, ok, err := cbg.ReadFullStringIntoBuf(cr, nameBuf, 8192)
 		if err != nil {
@@ -487,7 +516,7 @@ func (t *LabelerSyncSubscribeLabelers_Service) UnmarshalCBOR(r io.Reader) (err e
 
 				t.Src = string(sval)
 			}
-			// t.Record (bsky.LabelerService) (struct)
+			// t.Record (community.RawRecord) (struct)
 		case "record":
 
 			{
@@ -500,12 +529,23 @@ func (t *LabelerSyncSubscribeLabelers_Service) UnmarshalCBOR(r io.Reader) (err e
 					if err := cr.UnreadByte(); err != nil {
 						return err
 					}
-					t.Record = new(bsky.LabelerService)
+					t.Record = new(RawRecord)
 					if err := t.Record.UnmarshalCBOR(cr); err != nil {
 						return xerrors.Errorf("unmarshaling t.Record pointer: %w", err)
 					}
 				}
 
+			}
+			// t.Collection (string) (string)
+		case "collection":
+
+			{
+				sval, err := cbg.ReadStringWithMax(cr, 8192)
+				if err != nil {
+					return err
+				}
+
+				t.Collection = string(sval)
 			}
 
 		default:

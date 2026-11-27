@@ -4,31 +4,48 @@
   "defs": {
     "labelerView": {
       "type": "object",
-      "description": "Public projection of a registry labeler row, shared by the getLabelers and getLabeler queries. Internal fields (last_error, require_sig, updated_at) are deliberately excluded.",
-      "required": ["did", "endpoint", "source", "enabled", "last_upstream_seq"],
+      "description": "Public projection of a registry labeler row, shared by the getLabelers and getLabeler queries. Internal fields (last_error, require_sig) are deliberately excluded.",
+      "required": ["id", "did", "createdAt", "endpoint", "enabled", "last_upstream_seq", "declarations"],
       "nullable": ["last_upstream_seq"],
       "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Monotonically increasing identifier minted when the labeler is first registered; never reused."
+        },
         "did": {
           "type": "string",
           "format": "did",
           "description": "DID of the labeler."
         },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Date the relay first observed a labeler service declaration for this DID."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Date of the most recently observed labeler declaration update. Absent when this relay has not observed a declaration for the labeler."
+        },
         "endpoint": {
           "type": "string",
           "description": "Labeler host, including its port when the DID document specifies one. Stays empty until the relay resolves the labeler's DID document."
         },
-        "source": {
-          "type": "string",
-          "knownValues": ["firehose", "manual"],
-          "description": "How the labeler was registered: discovered from the firehose, or added manually via the admin API."
-        },
         "enabled": {
           "type": "boolean",
-          "description": "Whether the relay subscribes to this labeler's upstream stream."
+          "description": "Indicates whether this labeler is currently active. Labelers will be considered inactive if they have updated their service record to remove their labeler declaration."
         },
         "last_upstream_seq": {
           "type": "integer",
           "description": "Sequence number last ingested from the labeler's upstream stream. null when the labeler has never been observed."
+        },
+        "declarations": {
+          "type": "array",
+          "description": "Declaration collections this labeler currently holds, as observed by this relay. Empty when no declaration has been observed (e.g. manually added labelers).",
+          "items": {
+            "type": "string",
+            "knownValues": ["app.bsky.labeler.service", "town.delve.labeler.service", "so.sprk.labeler.service"]
+          }
         }
       }
     }

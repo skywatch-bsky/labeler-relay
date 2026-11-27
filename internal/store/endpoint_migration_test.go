@@ -14,7 +14,7 @@ func TestEndpointMigrationRollsBack(t *testing.T) {
 	}
 	defer s.Close()
 	for i, endpoint := range []string{"https://a.example/path", "http://b.example/path"} {
-		if _, err := s.DB().Exec("INSERT INTO labelers (did, endpoint, source, enabled, updated_at, observed_seq) VALUES (?, ?, 'manual', 1, 123, ?)", endpoint, endpoint, i+1); err != nil {
+		if _, err := s.DB().Exec("INSERT INTO labelers (did, endpoint, source, enabled, updated_at, id, created_at) VALUES (?, ?, 'manual', 1, 123, ?, 123)", endpoint, endpoint, i+1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -47,7 +47,7 @@ func TestEndpointMigration(t *testing.T) {
 		{"scoped-ipv6", "https://[fe80::1%25en0]:8443/old?token=x", "[fe80::1%25en0]:8443"},
 	}
 	for _, tt := range cases {
-		if _, err := s.DB().Exec("INSERT INTO labelers (did, endpoint, source, enabled, updated_at, observed_seq) VALUES (?, ?, 'manual', 1, 123, (SELECT COALESCE(MAX(observed_seq), 0)+1 FROM labelers))", tt.did, tt.endpoint); err != nil {
+		if _, err := s.DB().Exec("INSERT INTO labelers (did, endpoint, source, enabled, updated_at, id, created_at) VALUES (?, ?, 'manual', 1, 123, (SELECT COALESCE(MAX(id), 0)+1 FROM labelers), 123)", tt.did, tt.endpoint); err != nil {
 			t.Fatal(err)
 		}
 	}

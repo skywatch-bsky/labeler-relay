@@ -4,6 +4,7 @@ package firehose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -183,27 +184,41 @@ func (w *FirehoseWatcher) handleEvent(ctx context.Context, evt *stream.XRPCStrea
 	return cb.EventHandler(ctx, evt)
 }
 
-// handleCommit processes a commit event from the firehose.
+// handleCommit applies each declaration through ApplyServiceOp, which commits
+// the registry transition and #service event in one transaction.
+// Any ApplyServiceOp failure returns immediately without staging the cursor,
+// so redial replays the incomplete commit. Stopping at the first failure
+// prevents later ops from applying and duplicating events on replay.
+// The store deduplicates by commit sequence, DID, collection, rkey, and action.
+// Replayed ops emit no second event or reconcile poke.
 func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) error {
-	ops, err := ExtractLabelerServiceOps(ctx, commit)
+	ops, skipped, err := ExtractLabelerDeclarationOps(ctx, commit)
+	for _, item := range skipped {
+		w.log.Warn("skipping declaration op", "path", item.Path, "err", item.Err)
+	}
 	if err != nil {
 		w.log.Error("extract failed", "err", err)
-		// Record the error but don't crash.
+		// A hard extraction error means the CAR could not be trusted. Count
+		// this commit as processed and deliberately drop its declaration ops;
+		// replaying the same corrupt bytes would loop forever.
+		w.maybeFlushCursor(ctx, commit.Seq)
 		return nil
 	}
 
-	// interrupted is set when cancellation cut this commit short: an op
-	// failed because the context ended, so it and every op after it were
-	// neither registered nor recorded as an error.
+	// Resolver cancellation must prevent cursor staging even when the loop
+	// reaches its end without an ApplyServiceOp failure.
 	var interrupted error
 
 	for _, op := range ops {
-		w.log.Debug("labeler op", "did", op.RepoDID, "action", op.Action, "rkey", op.Rkey)
+		w.log.Debug("labeler declaration op", "did", op.RepoDID, "action", op.Action,
+			"collection", op.Collection, "rkey", op.Rkey)
 
 		if op.Action == "create" || op.Action == "update" {
 			endpoint, err := w.resolver.LabelerEndpoint(ctx, op.RepoDID)
 			if err != nil {
-				if err == ErrNoLabelerEndpoint {
+				// Resolver errors and RecordError writes are best-effort, unlike
+				// ApplyServiceOp failures. Track no declaration and emit no event.
+				if errors.Is(err, ErrNoLabelerEndpoint) {
 					w.log.Debug("no labeler endpoint", "did", op.RepoDID)
 					// Record the error in the registry and continue.
 					_ = w.registry.RecordError(ctx, op.RepoDID, "no atproto_labeler service endpoint")
@@ -217,45 +232,49 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				continue
 			}
 
-			// Upsert the labeler with firehose source.
-			// The Phase-2 upsert rule preserves manual labeler entries.
-			// Enabled only matters on first insert: the ON CONFLICT rule
-			// preserves the existing enabled state, so flipping the flag
-			// never disables an already-registered labeler.
-			err = w.registry.Upsert(ctx, store.Labeler{
-				DID:       op.RepoDID,
-				Endpoint:  endpoint,
-				Source:    "firehose",
-				Enabled:   w.autoSubscribe,
-				UpdatedAt: time.Now().Unix(),
+			res, err := w.persist.ApplyServiceOp(ctx, store.ServiceOp{
+				Op:            op.Action,
+				DID:           op.RepoDID,
+				Collection:    op.Collection,
+				Record:        op.Record,
+				Endpoint:      endpoint,
+				AutoSubscribe: w.autoSubscribe,
+				CommitSeq:     commit.Seq,
+				Rkey:          op.Rkey,
 			})
 			if err != nil {
-				w.log.Error("upsert failed", "did", op.RepoDID, "err", err)
-				if ctx.Err() != nil {
-					interrupted = ctx.Err()
-				}
+				// The whole op rolled back; the commit is incomplete and must
+				// not count as processed.
+				w.log.Error("apply service op failed", "did", op.RepoDID, "err", err)
+				return err
+			}
+			if res.Skipped {
+				w.log.Debug("replay of already-applied declaration op", "did", op.RepoDID, "collection", op.Collection)
 				continue
 			}
-
-			_, err = w.persist.PersistIngest(ctx, store.IngestEvent{
-				Kind:       "service",
-				LabelerDID: op.RepoDID,
-				Op:         op.Action,
-				Record:     op.Record,
-			})
-			if err != nil {
-				w.log.Error("persist failed", "did", op.RepoDID, "err", err)
-				if ctx.Err() != nil {
-					interrupted = ctx.Err()
-				}
-				continue
-			}
-
+			// A registry row and/or an event changed: reconcile the slurper.
 			w.poke()
 		} else if op.Action == "delete" {
-			// Delete ops: only disable firehose-sourced labelers, never manual.
-			// (Manual stickiness is enforced at the registry level.)
-			// For now, we skip this—only enable on discovery, don't disable.
+			res, err := w.persist.ApplyServiceOp(ctx, store.ServiceOp{
+				Op:         "delete",
+				DID:        op.RepoDID,
+				Collection: op.Collection,
+				Record:     nil,
+				CommitSeq:  commit.Seq,
+				Rkey:       op.Rkey,
+			})
+			if err != nil {
+				w.log.Error("apply service op failed", "did", op.RepoDID, "err", err)
+				return err
+			}
+			if res.Skipped {
+				// Skipped includes both untracked declarations and replayed deletes.
+				w.log.Debug("delete of untracked declaration", "did", op.RepoDID, "collection", op.Collection)
+			} else if res.EnabledChanged {
+				// A disable needs a slurper reconcile; the delete event alone
+				// does not.
+				w.poke()
+			}
 		}
 	}
 

@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "subscription",
-      "description": "Subscribe to an aggregated, re-sequenced stream of labels and labeler service records from multiple upstream labelers. Each message carries a single monotonic relay-assigned seq.",
+      "description": "Subscribe to an aggregated, re-sequenced stream of labels and labeler service declarations from multiple upstream labelers. Labeler declarations arrive from the app.bsky.labeler.service, town.delve.labeler.service, and so.sprk.labeler.service collections. Each message carries a single monotonic relay-assigned seq.",
       "parameters": {
         "type": "params",
         "properties": {
@@ -61,7 +61,7 @@
     },
     "service": {
       "type": "object",
-      "description": "A labeler service record observed via firehose discovery, carrying the relay-minted seq and the firehose operation type.",
+      "description": "A labeler service declaration observed via firehose discovery, carrying the relay-minted seq, the firehose operation type, the declaration collection, and the declaration record itself.",
       "required": ["seq", "src", "op"],
       "properties": {
         "seq": {
@@ -71,17 +71,21 @@
         "src": {
           "type": "string",
           "format": "did",
-          "description": "DID of the labeler whose service record this is."
+          "description": "DID of the labeler whose service declaration this is."
         },
         "op": {
           "type": "string",
           "description": "The firehose operation that triggered this event.",
           "knownValues": ["create", "update", "delete"]
         },
+        "collection": {
+          "type": "string",
+          "knownValues": ["app.bsky.labeler.service", "town.delve.labeler.service", "so.sprk.labeler.service"],
+          "description": "The declaration collection this record belongs to. Absent on frames recorded before multi-collection support; those records are app.bsky.labeler.service."
+        },
         "record": {
-          "type": "ref",
-          "ref": "app.bsky.labeler.service",
-          "description": "The full app.bsky.labeler.service record. Present for create/update ops, absent for delete."
+          "type": "unknown",
+          "description": "The full declaration record, passed through byte-faithfully from the labeler's repository as a CBOR map. Its schema is identified by collection. Present for create/update ops, absent for delete."
         }
       }
     },

@@ -68,22 +68,8 @@ func TestSeamBackfillLiveSeqOrdering(t *testing.T) {
 		"backfill→live seam must deliver all events in ascending order with no gaps or dups")
 }
 
-// TestSeamDuringBackfillPersist verifies AC2.2 boundary case: an event
-// persisted DURING backfill (present in both the live buffer AND the DB
-// for PlaybackFrames) is delivered EXACTLY ONCE.
-//
-// Deterministic mechanism — no timing/sleep races:
-//   Pre-persist 1..80 (a large backlog). StreamFrom(since=0, bufSize=16).
-//   The seam goroutine starts PlaybackFrames and forwards events to out
-//   (capacity 16). After 16 events fill out, the callback blocks on "out <- e"
-//   because the test hasn't drained yet. Backfill is provably mid-drain.
-//   While blocked, PersistIngest 81..83. These broadcast to the Hub's live
-//   channel (capacity 16, plenty of room since it's not full — only newly
-//   persisted events go there) AND are now in the DB (visible to the still-
-//   running PlaybackFrames query under WAL). Then drain out; backfill resumes
-//   (17..80), switches to live, dedup boundary drops any live events with
-//   RelaySeq <= lastBackfill (80), and forwards 81..83. Assert 1..83 exactly
-//   once, ascending.
+// Events persisted during backfill reach both storage and the live subscription but must appear only once.
+// An 80-event backlog exceeds the 16-event output buffer, so backfill cannot finish before the test resumes reads.
 func TestSeamDuringBackfillPersist(t *testing.T) {
 	p, cleanup := testPersist(t)
 	defer cleanup()

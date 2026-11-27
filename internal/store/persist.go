@@ -9,7 +9,6 @@ import (
 	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
-	bsky "github.com/bluesky-social/indigo/api/bsky"
 	"github.com/bluesky-social/indigo/cmd/relay/stream"
 	"github.com/bluesky-social/indigo/cmd/relay/stream/persist"
 )
@@ -23,15 +22,16 @@ const (
 	CursorOutdated
 )
 
-// IngestEvent is what the slurper (Phase 3) and firehose watcher (Phase 4)
-// hand to PersistIngest. Exported: it is the cross-package ingest entrypoint.
+// IngestEvent is input to PersistIngest for labels and direct event writes.
+// The watcher must use ApplyServiceOp to commit declaration changes and service events together.
 type IngestEvent struct {
 	Kind        string // "labels" | "service"
 	LabelerDID  string
 	UpstreamSeq *int64
 	Labels      []*comatproto.LabelDefs_Label // for kind="labels"
 	Op          string                        // for kind="service": "create" | "update" | "delete"
-	Record      *bsky.LabelerService          // for kind="service" (nil for delete)
+	Collection  string                        // for kind="service": declaration collection NSID
+	Record      []byte                        // for kind="service": raw DAG-CBOR record bytes (nil for delete)
 }
 
 // LiveEvent is what the broadcaster delivers to live subscribers. It carries
@@ -49,9 +49,9 @@ type LiveEvent struct {
 // and broadcasts to live subscribers.
 type LabelPersist struct {
 	store          *Store
-	mu             sync.Mutex     // serializes seq minting; single-writer
+	mu             sync.Mutex // serializes seq minting; single-writer
 	broadcaster    func(LiveEvent)
-	onHeadAdvanced func(float64)  // called after each successful persist with the new seq
+	onHeadAdvanced func(float64) // called after each successful persist with the new seq
 	pruneBatchSize int
 }
 
@@ -135,7 +135,7 @@ func (p *LabelPersist) PersistIngest(ctx context.Context, e IngestEvent) (relayS
 		}
 
 	case "service":
-		frameBytes, err = EncodeServiceFrame(relaySeq, e.LabelerDID, e.Op, e.Record)
+		frameBytes, err = EncodeServiceFrame(relaySeq, e.LabelerDID, e.Op, e.Collection, e.Record)
 		if err != nil {
 			return 0, fmt.Errorf("failed to encode service frame: %w", err)
 		}

@@ -471,10 +471,8 @@ func TestAdminAPI(t *testing.T) {
 	})
 }
 
-// TestAdminListOmitsObservedSeq verifies AC.8: the admin add, patch, and list
-// responses encode store.Labeler directly but must not leak the internal
-// ObservedSeq property (regression guard for its json:"-" tag).
-func TestAdminListOmitsObservedSeq(t *testing.T) {
+// Admin responses encode store.Labeler directly. Guard its json:"-" ID tag while allowing CreatedAt and DeclaredAt.
+func TestAdminListOmitsIDAndExposesCreatedAt(t *testing.T) {
 	_, api, token := setupTestEnv(t)
 	ctx := context.Background()
 
@@ -488,15 +486,16 @@ func TestAdminListOmitsObservedSeq(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code)
-	assertNoObservedSeqKey(t, rec.Body.String())
+	assertAdminJSONShape(t, rec.Body.String())
 
-	// Precondition: the stored row carries a minted observed_seq, so a leak
-	// would actually show up in the responses below.
+	// Use populated internal fields so the JSON-tag regression cannot pass with an empty row.
 	stored, found, err := api.registry.Get(ctx, "did:plc:labeler1")
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Greater(t, stored.ObservedSeq, int64(0),
-		"precondition: the stored row must have a minted observed_seq")
+	require.Greater(t, stored.ID, int64(0),
+		"precondition: the stored row must have a minted id")
+	require.Greater(t, stored.CreatedAt, int64(0),
+		"precondition: the stored row must have a created_at")
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest("PATCH", "/admin/labelers/did:plc:labeler1", bytes.NewBufferString(`{"require_sig": true}`))
@@ -504,7 +503,7 @@ func TestAdminListOmitsObservedSeq(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assertNoObservedSeqKey(t, rec.Body.String())
+	assertAdminJSONShape(t, rec.Body.String())
 
 	// List.
 	rec = httptest.NewRecorder()
@@ -512,15 +511,15 @@ func TestAdminListOmitsObservedSeq(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assertNoObservedSeqKey(t, rec.Body.String())
+	assertAdminJSONShape(t, rec.Body.String())
 }
 
-// assertNoObservedSeqKey checks that raw is valid JSON carrying no
-// ObservedSeq property anywhere.
-func assertNoObservedSeqKey(t *testing.T, raw string) {
+func assertAdminJSONShape(t *testing.T, raw string) {
 	t.Helper()
 	var decoded any
 	require.NoError(t, json.Unmarshal([]byte(raw), &decoded), "response must be valid JSON: %s", raw)
-	require.NotContains(t, raw, "ObservedSeq",
-		`admin JSON must not carry the internal ObservedSeq property (json:"-" regression)`)
+	require.NotContains(t, raw, "\"ID\"",
+		`admin JSON must not carry the row's ID property (json:"-" regression)`)
+	require.Contains(t, raw, "CreatedAt", "admin JSON must expose the additive CreatedAt key")
+	require.Contains(t, raw, "DeclaredAt", "admin JSON must expose the additive DeclaredAt key")
 }

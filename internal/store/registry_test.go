@@ -471,12 +471,8 @@ func TestRegistry(t *testing.T) {
 	})
 }
 
-// TestUpsertMintsMonotonicObservedSeq verifies AC.1: first inserts mint
-// observed_seq 1, 2, 3 in insertion order (the DIDs here are deliberately out
-// of lexical order, so this cannot pass on DID order); re-upserting an
-// existing labeler through both the firehose and the manual path leaves its
-// original observed_seq untouched.
-func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
+// DIDs are out of lexical order so DID sorting cannot imitate first-observed ordering.
+func TestUpsertMintsMonotonicID(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	s, err := store.Open(dbPath)
@@ -506,8 +502,8 @@ func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
 		if err != nil || !exists {
 			t.Fatalf("Get %s failed: exists=%v err=%v", did, exists, err)
 		}
-		if got.ObservedSeq != int64(i+1) {
-			t.Errorf("expected %s observed_seq=%d, got %d", did, i+1, got.ObservedSeq)
+		if got.ID != int64(i+1) {
+			t.Errorf("expected %s id=%d, got %d", did, i+1, got.ID)
 		}
 	}
 
@@ -537,8 +533,8 @@ func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after re-upserts failed: %v", err)
 	}
-	if got.ObservedSeq != 1 {
-		t.Errorf("expected observed_seq to stay 1 after re-upserts, got %d", got.ObservedSeq)
+	if got.ID != 1 {
+		t.Errorf("expected id to stay 1 after re-upserts, got %d", got.ID)
 	}
 
 	// A later first insert mints above the existing maximum, not from a
@@ -556,15 +552,12 @@ func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("Get late failed: exists=%v err=%v", exists, err)
 	}
-	if late.ObservedSeq != 4 {
-		t.Errorf("expected late insert observed_seq=4, got %d", late.ObservedSeq)
+	if late.ID != 4 {
+		t.Errorf("expected late insert id=4, got %d", late.ID)
 	}
 }
 
-// TestRecordErrorMintsObservedSeq verifies AC.1 for the discovery-error path:
-// RecordError on a fresh DID mints the next observed_seq like any first
-// insert; RecordError again on the same DID leaves it unchanged.
-func TestRecordErrorMintsObservedSeq(t *testing.T) {
+func TestRecordErrorMintsID(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	s, err := store.Open(dbPath)
@@ -575,7 +568,6 @@ func TestRecordErrorMintsObservedSeq(t *testing.T) {
 
 	reg := store.NewLabelerRegistry(s)
 
-	// Two regular inserts first: observed_seq 1 and 2.
 	for i, did := range []string{"did:plc:one", "did:plc:two"} {
 		if err := reg.Upsert(ctx, store.Labeler{
 			DID:       did,
@@ -597,8 +589,8 @@ func TestRecordErrorMintsObservedSeq(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("Get errored failed: exists=%v err=%v", exists, err)
 	}
-	if got.ObservedSeq != 3 {
-		t.Errorf("expected RecordError mint observed_seq=3, got %d", got.ObservedSeq)
+	if got.ID != 3 {
+		t.Errorf("expected RecordError mint id=3, got %d", got.ID)
 	}
 
 	// RecordError again on the existing DID: unchanged.
@@ -609,8 +601,8 @@ func TestRecordErrorMintsObservedSeq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get errored after second RecordError failed: %v", err)
 	}
-	if got.ObservedSeq != 3 {
-		t.Errorf("expected observed_seq to stay 3 after repeat RecordError, got %d", got.ObservedSeq)
+	if got.ID != 3 {
+		t.Errorf("expected id to stay 3 after repeat RecordError, got %d", got.ID)
 	}
 
 	// The next first insert continues above it.
@@ -627,7 +619,215 @@ func TestRecordErrorMintsObservedSeq(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("Get four failed: exists=%v err=%v", exists, err)
 	}
-	if fourth.ObservedSeq != 4 {
-		t.Errorf("expected next insert observed_seq=4, got %d", fourth.ObservedSeq)
+	if fourth.ID != 4 {
+		t.Errorf("expected next insert id=4, got %d", fourth.ID)
+	}
+}
+
+func requireDeclaredAt(t *testing.T, reg *store.LabelerRegistry, ctx context.Context, did string, want int64) {
+	t.Helper()
+	got, _, err := reg.Get(ctx, did)
+	if err != nil {
+		t.Fatalf("Get %s: %v", did, err)
+	}
+	if got.DeclaredAt == nil {
+		t.Fatalf("declared_at is NULL, want %d", want)
+	}
+	if *got.DeclaredAt != want {
+		t.Fatalf("declared_at = %d, want %d", *got.DeclaredAt, want)
+	}
+}
+
+func TestCreatedAtSetOnceAndPreserved(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "created.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+	reg := store.NewLabelerRegistry(s)
+	persist := store.NewLabelPersist(s)
+
+	const did = "did:plc:created"
+	if err := reg.Upsert(ctx, store.Labeler{
+		DID: did, Endpoint: "one.example.com", Source: "firehose", Enabled: true, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("first Upsert: %v", err)
+	}
+	first, _, err := reg.Get(ctx, did)
+	if err != nil {
+		t.Fatalf("Get after first insert: %v", err)
+	}
+	if first.CreatedAt <= 0 {
+		t.Fatalf("first insert must set created_at, got %d", first.CreatedAt)
+	}
+
+	unchanged := func(step string) {
+		t.Helper()
+		got, _, err := reg.Get(ctx, did)
+		if err != nil {
+			t.Fatalf("Get at step %q: %v", step, err)
+		}
+		if got.CreatedAt != first.CreatedAt {
+			t.Fatalf("created_at changed at step %q: %d != %d", step, got.CreatedAt, first.CreatedAt)
+		}
+	}
+
+	if err := reg.Upsert(ctx, store.Labeler{DID: did, Endpoint: "two.example.com", Source: "firehose", Enabled: true, UpdatedAt: 2000}); err != nil {
+		t.Fatalf("firehose re-upsert: %v", err)
+	}
+	unchanged("firehose re-upsert")
+	if err := reg.Upsert(ctx, store.Labeler{DID: did, Endpoint: "three.example.com", Source: "manual", Enabled: false, UpdatedAt: 3000}); err != nil {
+		t.Fatalf("manual re-upsert: %v", err)
+	}
+	unchanged("manual re-upsert")
+	if err := reg.RecordError(ctx, did, "boom"); err != nil {
+		t.Fatalf("RecordError: %v", err)
+	}
+	unchanged("RecordError")
+	if err := reg.WriteCursor(ctx, did, 55); err != nil {
+		t.Fatalf("WriteCursor: %v", err)
+	}
+	unchanged("WriteCursor")
+	if err := reg.SetEnabled(ctx, did, true); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	unchanged("SetEnabled")
+	sig := true
+	if err := reg.SetRequireSig(ctx, did, &sig); err != nil {
+		t.Fatalf("SetRequireSig: %v", err)
+	}
+	unchanged("SetRequireSig")
+
+	if _, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
+		Op: "create", DID: did, Collection: "app.bsky.labeler.service",
+		Record: []byte{0xa1, 0x61, 'a', 0x01}, Endpoint: "four.example.com", AutoSubscribe: true,
+	}); err != nil {
+		t.Fatalf("ApplyServiceOp: %v", err)
+	}
+	unchanged("ApplyServiceOp")
+}
+
+// Reset declared_at to 1000 between phases so operations in the same second must still show a timestamp change.
+func TestDeclaredAtOnlyMovesOnDeclarationOps(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "declared.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+	reg := store.NewLabelerRegistry(s)
+	persist := store.NewLabelPersist(s)
+
+	const did = "did:plc:declared"
+	if err := reg.Upsert(ctx, store.Labeler{
+		DID: did, Endpoint: "one.example.com", Source: "firehose", Enabled: true, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	assertNull := func(step string) {
+		t.Helper()
+		got, _, err := reg.Get(ctx, did)
+		if err != nil {
+			t.Fatalf("Get at step %q: %v", step, err)
+		}
+		if got.DeclaredAt != nil {
+			t.Fatalf("declared_at must stay NULL after %q, got %d", step, *got.DeclaredAt)
+		}
+	}
+	if err := reg.Upsert(ctx, store.Labeler{DID: did, Endpoint: "two.example.com", Source: "firehose", Enabled: true, UpdatedAt: 2000}); err != nil {
+		t.Fatalf("firehose re-upsert: %v", err)
+	}
+	assertNull("firehose re-upsert")
+	if err := reg.Upsert(ctx, store.Labeler{DID: did, Endpoint: "three.example.com", Source: "manual", Enabled: true, UpdatedAt: 3000}); err != nil {
+		t.Fatalf("manual re-upsert: %v", err)
+	}
+	assertNull("manual re-upsert")
+	if err := reg.RecordError(ctx, did, "still failing"); err != nil {
+		t.Fatalf("RecordError: %v", err)
+	}
+	assertNull("RecordError")
+	if err := reg.WriteCursor(ctx, did, 7); err != nil {
+		t.Fatalf("WriteCursor: %v", err)
+	}
+	assertNull("WriteCursor")
+	if err := reg.SetEnabled(ctx, did, false); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	assertNull("SetEnabled")
+	if err := reg.SetRequireSig(ctx, did, nil); err != nil {
+		t.Fatalf("SetRequireSig: %v", err)
+	}
+	assertNull("SetRequireSig")
+
+	if _, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
+		Op: "create", DID: did, Collection: "app.bsky.labeler.service",
+		Record: []byte{0xa1, 0x61, 'a', 0x01}, Endpoint: "four.example.com", AutoSubscribe: true,
+	}); err != nil {
+		t.Fatalf("ApplyServiceOp create: %v", err)
+	}
+	got, _, err := reg.Get(ctx, did)
+	if err != nil {
+		t.Fatalf("Get after create: %v", err)
+	}
+	if got.DeclaredAt == nil || *got.DeclaredAt <= 0 {
+		t.Fatalf("create must set declared_at, got %v", got.DeclaredAt)
+	}
+
+	setSentinel := func() {
+		if _, err := s.DB().Exec(`UPDATE labelers SET declared_at = 1000 WHERE did = ?`, did); err != nil {
+			t.Fatalf("sentinel update: %v", err)
+		}
+	}
+	setSentinel()
+	if err := reg.Upsert(ctx, store.Labeler{DID: did, Endpoint: "five.example.com", Source: "firehose", Enabled: true, UpdatedAt: 4000}); err != nil {
+		t.Fatalf("admin upsert: %v", err)
+	}
+	requireDeclaredAt(t, reg, ctx, did, 1000)
+	if err := reg.RecordError(ctx, did, "again"); err != nil {
+		t.Fatalf("RecordError: %v", err)
+	}
+	requireDeclaredAt(t, reg, ctx, did, 1000)
+	if err := reg.WriteCursor(ctx, did, 9); err != nil {
+		t.Fatalf("WriteCursor: %v", err)
+	}
+	requireDeclaredAt(t, reg, ctx, did, 1000)
+	if err := reg.SetEnabled(ctx, did, true); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	requireDeclaredAt(t, reg, ctx, did, 1000)
+	sig := false
+	if err := reg.SetRequireSig(ctx, did, &sig); err != nil {
+		t.Fatalf("SetRequireSig: %v", err)
+	}
+	requireDeclaredAt(t, reg, ctx, did, 1000)
+
+	if _, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
+		Op: "update", DID: did, Collection: "app.bsky.labeler.service",
+		Record: []byte{0xa1, 0x61, 'b', 0x02}, Endpoint: "five.example.com", AutoSubscribe: true,
+	}); err != nil {
+		t.Fatalf("ApplyServiceOp update: %v", err)
+	}
+	got, _, err = reg.Get(ctx, did)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if got.DeclaredAt == nil || *got.DeclaredAt <= 1000 {
+		t.Fatalf("update must advance declared_at past the sentinel, got %v", got.DeclaredAt)
+	}
+
+	setSentinel()
+	if _, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
+		Op: "delete", DID: did, Collection: "app.bsky.labeler.service",
+	}); err != nil {
+		t.Fatalf("ApplyServiceOp delete: %v", err)
+	}
+	got, _, err = reg.Get(ctx, did)
+	if err != nil {
+		t.Fatalf("Get after delete: %v", err)
+	}
+	if got.DeclaredAt == nil || *got.DeclaredAt <= 1000 {
+		t.Fatalf("tracked delete must advance declared_at past the sentinel, got %v", got.DeclaredAt)
 	}
 }

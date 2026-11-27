@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/scarndp/labeler-relay/internal/store"
@@ -24,26 +25,46 @@ const (
 )
 
 // labelerView is the public projection of a registry labeler row.
-// last_error, require_sig, and updated_at are deliberately excluded.
-// last_upstream_seq is always emitted: null for labelers that have never
-// ingested, numeric otherwise.
+// id is monotonic. createdAt uses RFC3339 UTC.
+// updatedAt is present exactly when declared_at is set, not the internal updated_at timestamp.
+// declarations is always non-null and uses [] for an empty set.
+// last_upstream_seq is always present, with null for labelers that have never ingested.
+// source, last_error, require_sig, and internal updated_at are not public fields.
 type labelerView struct {
-	DID             string `json:"did"`
-	Endpoint        string `json:"endpoint"`
-	Source          string `json:"source"`
-	Enabled         bool   `json:"enabled"`
-	LastUpstreamSeq *int64 `json:"last_upstream_seq"`
+	ID              int64    `json:"id"`
+	DID             string   `json:"did"`
+	CreatedAt       string   `json:"createdAt"`
+	UpdatedAt       *string  `json:"updatedAt,omitempty"`
+	Endpoint        string   `json:"endpoint"`
+	Enabled         bool     `json:"enabled"`
+	LastUpstreamSeq *int64   `json:"last_upstream_seq"`
+	Declarations    []string `json:"declarations"`
 }
 
-// newLabelerView projects a registry row to its public view.
-func newLabelerView(l store.Labeler) labelerView {
-	return labelerView{
+// newLabelerView normalizes nil declarations so JSON emits [], not null.
+func newLabelerView(l store.Labeler, declarations []string) labelerView {
+	if declarations == nil {
+		declarations = []string{}
+	}
+	v := labelerView{
+		ID:              l.ID,
 		DID:             l.DID,
+		CreatedAt:       formatDatetime(l.CreatedAt),
 		Endpoint:        l.Endpoint,
-		Source:          l.Source,
 		Enabled:         l.Enabled,
 		LastUpstreamSeq: l.LastUpstreamSeq,
+		Declarations:    declarations,
 	}
+	if l.DeclaredAt != nil {
+		updatedAt := formatDatetime(*l.DeclaredAt)
+		v.UpdatedAt = &updatedAt
+	}
+	return v
+}
+
+// formatDatetime uses whole-second RFC3339 UTC for the public datetime contract.
+func formatDatetime(sec int64) string {
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
 
 // xrpcErrorBody is the JSON shape XRPC requires on error responses:
@@ -61,9 +82,8 @@ func writeXRPCError(w http.ResponseWriter, status int, name, msg string) {
 	_ = json.NewEncoder(w).Encode(xrpcErrorBody{Error: name, Message: msg})
 }
 
-// getLabelersResponse is the JSON body returned by HandleGetLabelers.
-// Cursor (an observed_seq value) is present only when further pages exist;
-// observed_seq values start at 1, so 0 reliably means "absent" under omitempty.
+// getLabelersResponse includes the last row's id as Cursor only when more pages exist.
+// IDs start at 1, so omitempty can use zero for an absent cursor.
 type getLabelersResponse struct {
 	Labelers []labelerView `json:"labelers"`
 	Cursor   int64         `json:"cursor,omitempty"`
@@ -72,9 +92,8 @@ type getLabelersResponse struct {
 // HandleGetLabelers serves GET /xrpc/community.labeler.sync.getLabelers.
 //
 // Params: limit (integer, default 50, rejected outside 1-100), cursor (the
-// observed_seq of the last item of the previous page; keyset pagination over
-// the observed-ordered list), enabled (literal true/false filter; absent
-// returns all).
+// id of the last item of the previous page; keyset pagination over the
+// id-ordered list), enabled (literal true/false filter; absent returns all).
 func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -118,15 +137,15 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	labelers, err := s.registry.List(ctx)
+	// Read rows and declarations from one SQLite snapshot to prevent mixed-state views.
+	labelers, declarations, err := s.registry.ListWithDeclarations(ctx)
 	if err != nil {
-		s.log.Error("query: failed to list labelers", "err", err)
+		s.log.Error("query: failed to read labelers and declarations", "err", err)
 		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
 		return
 	}
 
-	// List returns rows in ascending observed_seq order (first-observed
-	// first); apply the enabled filter in memory to keep a single read path.
+	// Filter the id-ordered snapshot in memory to keep one read path.
 	filtered := make([]store.Labeler, 0, len(labelers))
 	for _, l := range labelers {
 		if enabledFilter == nil || l.Enabled == *enabledFilter {
@@ -134,13 +153,10 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Keyset pagination: skip rows at or before the cursor observed_seq, then
-	// take one page. A cursor past the current maximum (or past a range whose
-	// rows were later disabled by the filter) yields an empty or partial page
-	// with no cursor — a clean end-of-walk, never an error.
+	// Keyset pagination uses the row id. A cursor beyond the filtered rows ends the walk without an error.
 	start := 0
 	if hasCursor {
-		for start < len(filtered) && filtered[start].ObservedSeq <= cursor {
+		for start < len(filtered) && filtered[start].ID <= cursor {
 			start++
 		}
 	}
@@ -151,14 +167,12 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]labelerView, 0, end-start)
 	for _, l := range filtered[start:end] {
-		views = append(views, newLabelerView(l))
+		views = append(views, newLabelerView(l, declarations[l.DID]))
 	}
 
 	resp := getLabelersResponse{Labelers: views}
 	if end < len(filtered) {
-		// labelerView does not serialize observed_seq, so the cursor value
-		// comes from the store rows, not the views.
-		resp.Cursor = filtered[end-1].ObservedSeq
+		resp.Cursor = filtered[end-1].ID
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -185,9 +199,10 @@ func (s *Server) HandleGetLabeler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	labeler, found, err := s.registry.Get(ctx, did.String())
+	// Read the row and declarations from one SQLite snapshot to prevent a mixed-state view.
+	labeler, declarations, found, err := s.registry.GetWithDeclarations(ctx, did.String())
 	if err != nil {
-		s.log.Error("query: failed to read labeler", "err", err)
+		s.log.Error("query: failed to read labeler and declarations", "err", err)
 		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
 		return
 	}
@@ -197,7 +212,7 @@ func (s *Server) HandleGetLabeler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(newLabelerView(labeler)); err != nil {
+	if err := json.NewEncoder(w).Encode(newLabelerView(labeler, declarations)); err != nil {
 		s.log.Error("query: failed to encode response", "err", err)
 	}
 }

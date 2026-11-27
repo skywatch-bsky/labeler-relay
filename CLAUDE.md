@@ -21,12 +21,13 @@ Last verified: 2026-11-27
 ## Project Structure
 - `cmd/labeler-relay/` - Entry point; wires all components via errgroup
 - `api/community/` - Output lexicon Go types + CBOR codegen (do not hand-edit `cbor_gen.go`)
-- `lexicons/` - Lexicon JSON schemas for `community.labeler.sync.subscribeLabelers` and the public query endpoints (`community.labeler.sync.getLabelers`/`getLabeler`)
+- `lexicons/` - Lexicon JSON schemas for `community.labeler.sync.subscribeLabelers` (labels + labeler service declarations from the `app.bsky.labeler.service`, `town.delve.labeler.service`, and `so.sprk.labeler.service` collections) and the public query endpoints (`community.labeler.sync.getLabelers`/`getLabeler`, sharing the `labelerView` object with `id`/`createdAt`/optional `updatedAt`/`declarations`)
 - `gen/` - CBOR codegen driver (run via `make cborgen`)
-- `internal/store/` - SQLite store, LabelPersist (seq minting + broadcast), LabelerRegistry, PruneJob
+- `internal/store/` - SQLite store, LabelPersist (seq minting + broadcast; `ApplyServiceOp` for atomic labeler declaration ops), LabelerRegistry (incl. `labeler_declarations`), PruneJob
 - `internal/labelerendpoint/` - Pure host extraction and secure subscription URL construction. Stored and API endpoints contain only the host and optional port.
+- `internal/dagcbor/` - Checked, bounded, one-item DAG-CBOR scanning (slice validation + streaming) backing declaration-record validation and `RawRecord`'s frame decode
 - `internal/slurper/` - Per-labeler upstream subscriptions with redial, rate limiting, sig policy
-- `internal/firehose/` - Firehose watcher for labeler auto-discovery, DID resolution
+- `internal/firehose/` - Firehose watcher for labeler auto-discovery (all three declaration collections), DID resolution
 - `internal/server/` - Output WebSocket server: Hub fan-out, backfill-to-live seam, XRPC framing; public query endpoints (`getLabelers`/`getLabeler`) with per-client-IP rate limiting
 - `internal/admin/` - Bearer-auth HTTP CRUD for labeler registry management
 - `internal/config/` - Env-based config loading with validation

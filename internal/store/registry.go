@@ -18,10 +18,15 @@ type Labeler struct {
 	LastUpstreamSeq *int64
 	LastError       string
 	UpdatedAt       int64
-	// ObservedSeq is the internal first-observation sequence used for
-	// first-observed ordering and getLabelers pagination. json:"-" keeps it
-	// out of admin JSON, which encodes store.Labeler directly.
-	ObservedSeq int64 `json:"-"`
+	// ID is minted at first insert, never changed or reused.
+	// It backs labelerView.id, first-observed ordering, and getLabelers pagination.
+	// Admin JSON omits it.
+	ID int64 `json:"-"`
+	// CreatedAt is set once at first insert, in Unix seconds. It backs labelerView.createdAt.
+	CreatedAt int64
+	// DeclaredAt backs labelerView.updatedAt, in Unix seconds. It is nil until a declaration transition occurs.
+	// Only ApplyServiceOp writes it. Other registry changes must not advance the public declaration timestamp.
+	DeclaredAt *int64
 }
 
 type LabelerRegistry struct {
@@ -32,7 +37,25 @@ func NewLabelerRegistry(s *Store) *LabelerRegistry {
 	return &LabelerRegistry{store: s}
 }
 
+// Upsert preserves operator-controlled state on firehose updates.
+// For declaration operations, use LabelPersist.ApplyServiceOp to commit the registry change and event together.
 func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
+	tx, err := r.store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin upsert transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := upsertLabelerTx(ctx, tx, labeler); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit upsert: %w", err)
+	}
+	return nil
+}
+
+// upsertLabelerTx shares the caller's transaction so declaration changes and events can commit together.
+func upsertLabelerTx(ctx context.Context, tx *sql.Tx, labeler Labeler) error {
 	var requireSig interface{} = nil
 	if labeler.RequireSig != nil {
 		requireSig = *labeler.RequireSig
@@ -48,23 +71,14 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 		lastError = labeler.LastError
 	}
 
-	// Stickiness rule: firehose upserts only refresh endpoint and updated_at,
-	// preserving operator-controlled source and enabled. Manual upserts claim
-	// the row: they additionally take over source and enabled so an operator
-	// add always yields the requested state, even when the row was previously
-	// inserted disabled by discovery (e.g. via RecordError). Cursor and sig
-	// policy are preserved in both cases. A successful upsert clears
-	// last_error: the row resolved cleanly, so any prior discovery error is
-	// stale.
-	//
-	// observed_seq is minted at first insert only (MAX+1 over the table); the
-	// ON CONFLICT branches never list it, so re-upserts keep the original
-	// value and the sequence stays monotonic and never reused. SQLite
-	// serializes writers (single process, busy_timeout), so concurrent
-	// first-inserts stay monotonic.
+	// Firehose conflicts preserve source and enabled. Manual conflicts replace both.
+	// Both preserve cursor, require_sig, id, created_at, and declared_at.
+	// A successful upsert clears last_error because the discovery error is stale.
+	// Mint id as MAX(id)+1 and set created_at only at first insert.
+	// SQLite serializes writers. Labeler rows are never deleted, so IDs cannot be reused.
 	query := `
-		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(observed_seq), 0) + 1 FROM labelers), ?)
+		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(id), 0) + 1 FROM labelers), ?, ?)
 		ON CONFLICT(did) DO UPDATE SET
 			endpoint = excluded.endpoint,
 			last_error = NULL,
@@ -72,8 +86,8 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 	`
 	if labeler.Source == "manual" {
 		query = `
-		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(observed_seq), 0) + 1 FROM labelers), ?)
+		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(id), 0) + 1 FROM labelers), ?, ?)
 		ON CONFLICT(did) DO UPDATE SET
 			endpoint = excluded.endpoint,
 			source = excluded.source,
@@ -88,7 +102,7 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 		enabled = 1
 	}
 
-	_, err := r.store.DB().ExecContext(ctx, query,
+	_, err := tx.ExecContext(ctx, query,
 		labeler.DID,
 		labeler.Endpoint,
 		labeler.Source,
@@ -96,6 +110,7 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 		requireSig,
 		lastUpstreamSeq,
 		lastError,
+		time.Now().Unix(),
 		labeler.UpdatedAt,
 	)
 	if err != nil {
@@ -153,24 +168,19 @@ func (r *LabelerRegistry) SetRequireSig(ctx context.Context, did string, require
 	return nil
 }
 
-func (r *LabelerRegistry) Get(ctx context.Context, did string) (Labeler, bool, error) {
+const labelerColumns = `did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, id, created_at, declared_at, updated_at`
+
+// scanLabeler decodes one labelers row in labelerColumns order.
+func scanLabeler(s interface{ Scan(...any) error }) (Labeler, error) {
 	var labeler Labeler
 	var enabled int
 	var requireSig *bool
 	var lastUpstreamSeq *int64
 	var lastError *string
 
-	err := r.store.DB().QueryRowContext(ctx,
-		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at
-		 FROM labelers WHERE did = ?`,
-		did,
-	).Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.ObservedSeq, &labeler.UpdatedAt)
-
-	if err == sql.ErrNoRows {
-		return Labeler{}, false, nil
-	}
-	if err != nil {
-		return Labeler{}, false, fmt.Errorf("failed to get labeler: %w", err)
+	if err := s.Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig,
+		&lastUpstreamSeq, &lastError, &labeler.ID, &labeler.CreatedAt, &labeler.DeclaredAt, &labeler.UpdatedAt); err != nil {
+		return Labeler{}, err
 	}
 
 	labeler.Enabled = enabled != 0
@@ -180,13 +190,24 @@ func (r *LabelerRegistry) Get(ctx context.Context, did string) (Labeler, bool, e
 		labeler.LastError = *lastError
 	}
 
+	return labeler, nil
+}
+
+func (r *LabelerRegistry) Get(ctx context.Context, did string) (Labeler, bool, error) {
+	labeler, err := scanLabeler(r.store.DB().QueryRowContext(ctx,
+		`SELECT `+labelerColumns+` FROM labelers WHERE did = ?`, did))
+	if err == sql.ErrNoRows {
+		return Labeler{}, false, nil
+	}
+	if err != nil {
+		return Labeler{}, false, fmt.Errorf("failed to get labeler: %w", err)
+	}
 	return labeler, true, nil
 }
 
 func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 	rows, err := r.store.DB().QueryContext(ctx,
-		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at
-		 FROM labelers ORDER BY observed_seq ASC`)
+		`SELECT `+labelerColumns+` FROM labelers ORDER BY id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list labelers: %w", err)
 	}
@@ -194,23 +215,10 @@ func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 
 	var labelers []Labeler
 	for rows.Next() {
-		var labeler Labeler
-		var enabled int
-		var requireSig *bool
-		var lastUpstreamSeq *int64
-		var lastError *string
-
-		if err := rows.Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.ObservedSeq, &labeler.UpdatedAt); err != nil {
+		labeler, err := scanLabeler(rows)
+		if err != nil {
 			return nil, fmt.Errorf("failed to scan labeler: %w", err)
 		}
-
-		labeler.Enabled = enabled != 0
-		labeler.RequireSig = requireSig
-		labeler.LastUpstreamSeq = lastUpstreamSeq
-		if lastError != nil {
-			labeler.LastError = *lastError
-		}
-
 		labelers = append(labelers, labeler)
 	}
 
@@ -221,12 +229,109 @@ func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 	return labelers, nil
 }
 
+// testBetweenSnapshotReads lets tests commit a concurrent write between snapshot queries. It must be nil outside tests.
+var testBetweenSnapshotReads func()
+
+// ListWithDeclarations returns the id-ordered labelers and their declarations
+// from one SQLite read snapshot.
+func (r *LabelerRegistry) ListWithDeclarations(ctx context.Context) ([]Labeler, map[string][]string, error) {
+	tx, err := r.store.DB().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to begin labeler snapshot: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT `+labelerColumns+` FROM labelers ORDER BY id ASC`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list labelers: %w", err)
+	}
+	var labelers []Labeler
+	for rows.Next() {
+		l, scanErr := scanLabeler(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("failed to scan labeler: %w", scanErr)
+		}
+		labelers = append(labelers, l)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, fmt.Errorf("error iterating labelers: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close labelers: %w", err)
+	}
+	if testBetweenSnapshotReads != nil {
+		testBetweenSnapshotReads()
+	}
+	declRows, err := tx.QueryContext(ctx, `SELECT did, collection FROM labeler_declarations ORDER BY did ASC, collection ASC`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list declarations: %w", err)
+	}
+	declarations := make(map[string][]string)
+	for declRows.Next() {
+		var did, collection string
+		if err := declRows.Scan(&did, &collection); err != nil {
+			declRows.Close()
+			return nil, nil, fmt.Errorf("failed to scan declaration: %w", err)
+		}
+		declarations[did] = append(declarations[did], collection)
+	}
+	if err := declRows.Err(); err != nil {
+		declRows.Close()
+		return nil, nil, fmt.Errorf("error iterating declarations: %w", err)
+	}
+	if err := declRows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close declarations: %w", err)
+	}
+	return labelers, declarations, nil
+}
+
+// GetWithDeclarations returns one labeler and its declaration collections
+// from one SQLite read snapshot, preserving Get's found semantics.
+func (r *LabelerRegistry) GetWithDeclarations(ctx context.Context, did string) (Labeler, []string, bool, error) {
+	tx, err := r.store.DB().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to begin labeler snapshot: %w", err)
+	}
+	defer tx.Rollback()
+	labeler, err := scanLabeler(tx.QueryRowContext(ctx, `SELECT `+labelerColumns+` FROM labelers WHERE did = ?`, did))
+	if err == sql.ErrNoRows {
+		return Labeler{}, []string{}, false, nil
+	}
+	if err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to get labeler: %w", err)
+	}
+	if testBetweenSnapshotReads != nil {
+		testBetweenSnapshotReads()
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT collection FROM labeler_declarations WHERE did = ? ORDER BY collection ASC`, did)
+	if err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to list declarations: %w", err)
+	}
+	declarations := []string{}
+	for rows.Next() {
+		var collection string
+		if err := rows.Scan(&collection); err != nil {
+			rows.Close()
+			return Labeler{}, nil, false, fmt.Errorf("failed to scan declaration: %w", err)
+		}
+		declarations = append(declarations, collection)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Labeler{}, nil, false, fmt.Errorf("error iterating declarations: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to close declarations: %w", err)
+	}
+	return labeler, declarations, true, nil
+}
+
 func (r *LabelerRegistry) ListEnabled(ctx context.Context) ([]Labeler, error) {
 	// ORDER BY did is retained deliberately: ListEnabled feeds Reconcile's
 	// internal set semantics, where order is irrelevant.
 	rows, err := r.store.DB().QueryContext(ctx,
-		`SELECT did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, observed_seq, updated_at
-		 FROM labelers WHERE enabled = 1 ORDER BY did`)
+		`SELECT `+labelerColumns+` FROM labelers WHERE enabled = 1 ORDER BY did`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list enabled labelers: %w", err)
 	}
@@ -234,23 +339,10 @@ func (r *LabelerRegistry) ListEnabled(ctx context.Context) ([]Labeler, error) {
 
 	var labelers []Labeler
 	for rows.Next() {
-		var labeler Labeler
-		var enabled int
-		var requireSig *bool
-		var lastUpstreamSeq *int64
-		var lastError *string
-
-		if err := rows.Scan(&labeler.DID, &labeler.Endpoint, &labeler.Source, &enabled, &requireSig, &lastUpstreamSeq, &lastError, &labeler.ObservedSeq, &labeler.UpdatedAt); err != nil {
+		labeler, err := scanLabeler(rows)
+		if err != nil {
 			return nil, fmt.Errorf("failed to scan labeler: %w", err)
 		}
-
-		labeler.Enabled = enabled != 0
-		labeler.RequireSig = requireSig
-		labeler.LastUpstreamSeq = lastUpstreamSeq
-		if lastError != nil {
-			labeler.LastError = *lastError
-		}
-
 		labelers = append(labelers, labeler)
 	}
 
@@ -259,6 +351,60 @@ func (r *LabelerRegistry) ListEnabled(ctx context.Context) ([]Labeler, error) {
 	}
 
 	return labelers, nil
+}
+
+// DeclarationsFor returns the declaration collections a labeler currently
+// holds, ordered by collection. The result is non-nil: an empty slice when
+// the labeler holds none (e.g. manually added labelers).
+//
+// Declaration rows are written only by LabelPersist.ApplyServiceOp; the set
+// reflects only declaration ops this relay observed.
+func (r *LabelerRegistry) DeclarationsFor(ctx context.Context, did string) ([]string, error) {
+	rows, err := r.store.DB().QueryContext(ctx,
+		`SELECT collection FROM labeler_declarations WHERE did = ? ORDER BY collection ASC`, did)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list declarations: %w", err)
+	}
+	defer rows.Close()
+
+	collections := []string{}
+	for rows.Next() {
+		var collection string
+		if err := rows.Scan(&collection); err != nil {
+			return nil, fmt.Errorf("failed to scan declaration: %w", err)
+		}
+		collections = append(collections, collection)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating declarations: %w", err)
+	}
+
+	return collections, nil
+}
+
+// ListDeclarations returns the declaration collections of every labeler that
+// holds at least one, keyed by DID. The bulk read behind getLabelers.
+func (r *LabelerRegistry) ListDeclarations(ctx context.Context) (map[string][]string, error) {
+	rows, err := r.store.DB().QueryContext(ctx,
+		`SELECT did, collection FROM labeler_declarations ORDER BY did ASC, collection ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all declarations: %w", err)
+	}
+	defer rows.Close()
+
+	byDID := make(map[string][]string)
+	for rows.Next() {
+		var did, collection string
+		if err := rows.Scan(&did, &collection); err != nil {
+			return nil, fmt.Errorf("failed to scan declaration row: %w", err)
+		}
+		byDID[did] = append(byDID[did], collection)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating declaration rows: %w", err)
+	}
+
+	return byDID, nil
 }
 
 func (r *LabelerRegistry) ReadCursor(ctx context.Context, did string) (*int64, error) {
@@ -301,21 +447,19 @@ func (r *LabelerRegistry) WriteCursor(ctx context.Context, did string, seq int64
 	return nil
 }
 
-// RecordError records or updates an error message for a labeler.
-// For fresh labelers (not yet in the registry), inserts a minimal row with source='firehose', enabled=0,
-// minting the next observed_seq like any first insert.
-// For existing labelers, updates only last_error and updated_at, preserving source and enabled
-// (and the existing observed_seq, which the ON CONFLICT branch never lists).
-// This ensures manual labelers remain sticky even when discovery encounters errors.
+// RecordError inserts unknown DIDs as disabled firehose rows, minting id and setting created_at once.
+// ON CONFLICT changes only last_error and updated_at, preserving operator state, identity, and declaration timestamps.
+// New rows have no declaration and NULL declared_at, so the first successful declaration can re-enable them.
 func (r *LabelerRegistry) RecordError(ctx context.Context, did, msg string) error {
 	query := `
-		INSERT INTO labelers(did, endpoint, last_error, source, enabled, observed_seq, updated_at)
-		VALUES (?, '', ?, 'firehose', 0, (SELECT COALESCE(MAX(observed_seq), 0) + 1 FROM labelers), ?)
+		INSERT INTO labelers(did, endpoint, last_error, source, enabled, id, created_at, updated_at)
+		VALUES (?, '', ?, 'firehose', 0, (SELECT COALESCE(MAX(id), 0) + 1 FROM labelers), ?, ?)
 		ON CONFLICT(did) DO UPDATE SET
 			last_error = excluded.last_error,
 			updated_at = excluded.updated_at
 	`
-	_, err := r.store.DB().ExecContext(ctx, query, did, msg, time.Now().Unix())
+	now := time.Now().Unix()
+	_, err := r.store.DB().ExecContext(ctx, query, did, msg, now, now)
 	if err != nil {
 		return fmt.Errorf("failed to record error: %w", err)
 	}

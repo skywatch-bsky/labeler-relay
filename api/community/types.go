@@ -1,8 +1,13 @@
 package community
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
-	bsky "github.com/bluesky-social/indigo/api/bsky"
+
+	"github.com/scarndp/labeler-relay/internal/dagcbor"
 )
 
 // LabelerSyncSubscribeLabelers_Labels is the #labels variant of the
@@ -21,23 +26,44 @@ type LabelerSyncSubscribeLabelers_Labels struct {
 	Labels      []*comatproto.LabelDefs_Label `json:"labels" cborgen:"labels"`
 }
 
-// LabelerSyncSubscribeLabelers_Service is the #service variant, carrying a
-// full app.bsky.labeler.service record observed via firehose discovery.
-//
-//   - Seq: relay-minted global sequence number
-//   - Src: labeler DID
-//   - Op: firehose operation ("create", "update", "delete")
-//   - Record: full app.bsky.labeler.service record (nil for delete)
-//
-// FIDELITY NOTE: the service record is decoded from the firehose CAR into a
-// typed *bsky.LabelerService and re-encoded here. It is field-faithful but
-// not byte-faithful. No acceptance criterion requires service-record signature
-// fidelity; only labels are byte-faithful.
+// RawRecord preserves an upstream CAR block's DAG-CBOR bytes without re-encoding.
+// The struct wrapper prevents cbor-gen from treating a []byte-derived type as a byte string.
+// Both handwritten CBOR methods use pointer receivers to match cbor-gen's interfaces.
+// Do not regenerate these methods.
+type RawRecord struct {
+	CBOR []byte
+}
+
+// MarshalCBOR writes the embedded CBOR bytes verbatim.
+func (r *RawRecord) MarshalCBOR(w io.Writer) error {
+	if r == nil || len(r.CBOR) == 0 {
+		return fmt.Errorf("community.RawRecord: cannot marshal an empty CBOR payload")
+	}
+	_, err := w.Write(r.CBOR)
+	return err
+}
+
+// UnmarshalCBOR validates and consumes exactly one DAG-CBOR item.
+// In the frame map, "record" sorts before "collection". Reading past one item corrupts the following field.
+func (r *RawRecord) UnmarshalCBOR(cr io.Reader) error {
+	var buf bytes.Buffer
+	if err := dagcbor.ScanOne(cr, &buf); err != nil {
+		return err
+	}
+	r.CBOR = buf.Bytes()
+	return nil
+}
+
+// LabelerSyncSubscribeLabelers_Service carries a firehose declaration in a #service frame.
+// Seq is relay-minted. Src is the labeler DID. Op is create, update, or delete.
+// An empty Collection identifies a legacy app.bsky.labeler.service frame.
+// Record preserves the upstream CAR block bytes and is nil for delete.
 type LabelerSyncSubscribeLabelers_Service struct {
-	Seq    int64                `json:"seq" cborgen:"seq"`
-	Src    string               `json:"src" cborgen:"src"`
-	Op     string               `json:"op" cborgen:"op"`
-	Record *bsky.LabelerService `json:"record,omitempty" cborgen:"record,omitempty"`
+	Seq        int64      `json:"seq" cborgen:"seq"`
+	Src        string     `json:"src" cborgen:"src"`
+	Op         string     `json:"op" cborgen:"op"`
+	Collection string     `json:"collection,omitempty" cborgen:"collection,omitempty"`
+	Record     *RawRecord `json:"record,omitempty" cborgen:"record,omitempty"`
 }
 
 // LabelerSyncSubscribeLabelers_Info is the #info variant (e.g. OutdatedCursor).

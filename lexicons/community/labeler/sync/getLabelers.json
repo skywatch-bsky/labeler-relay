@@ -17,7 +17,7 @@
           },
           "cursor": {
             "type": "integer",
-            "description": "The observed_seq of the last labeler on the previous page. Pass it back to fetch the next page; a response without a cursor is the last page."
+            "description": "The id of the last labeler on the previous page. Pass it back to fetch the next page; a response without a cursor is the last page."
           },
           "enabled": {
             "type": "boolean",
@@ -41,7 +41,7 @@
             },
             "cursor": {
               "type": "integer",
-              "description": "The observed_seq of the last labeler on this page. Present only when further pages exist."
+              "description": "The id of the last labeler on this page. Present only when further pages exist."
             }
           }
         }

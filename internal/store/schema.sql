@@ -7,9 +7,15 @@ CREATE TABLE IF NOT EXISTS events (
     labeler_did  TEXT    NOT NULL,
     upstream_seq INTEGER,
     frame_cbor   BLOB    NOT NULL,
-    ingest_ts    INTEGER NOT NULL -- milliseconds since epoch (prune cutoff)
+    ingest_ts    INTEGER NOT NULL, -- milliseconds since epoch (prune cutoff)
+    dedup_key    TEXT -- upstream-op identity svc:<commitSeq>/<did>/<collection>/<rkey>/<op> for replay dedup; NULL for labels-path events
 );
 CREATE INDEX IF NOT EXISTS idx_events_ingest_ts ON events (ingest_ts);
+
+CREATE TABLE IF NOT EXISTS applied_service_ops (
+    dedup_key  TEXT PRIMARY KEY, -- upstream declaration-op identity; survives event pruning
+    applied_ts INTEGER NOT NULL -- unix seconds, informational
+);
 
 CREATE TABLE IF NOT EXISTS labelers (
     did              TEXT PRIMARY KEY,
@@ -19,8 +25,17 @@ CREATE TABLE IF NOT EXISTS labelers (
     require_sig      INTEGER,
     last_upstream_seq INTEGER,
     last_error       TEXT,
-    observed_seq     INTEGER, -- first-observation sequence (minted at first insert; backfilled by the migrate step in store.go)
+    id               INTEGER, -- monotonically increasing identifier, minted at first insert and never reused (renamed from observed_seq; ancient databases get it backfilled by the migrate step in store.go)
+    created_at       INTEGER NOT NULL, -- unix SECONDS: row creation, never updated (migrated rows are backfilled from updated_at by the migrate step in store.go)
+    declared_at      INTEGER, -- unix SECONDS: last observed declaration transition; NULL until one is observed; written only by ApplyServiceOp
     updated_at       INTEGER NOT NULL -- unix SECONDS (unlike events.ingest_ts, which is milliseconds)
+);
+
+CREATE TABLE IF NOT EXISTS labeler_declarations (
+    did        TEXT NOT NULL,
+    collection TEXT NOT NULL, -- declaration collection NSID, e.g. app.bsky.labeler.service
+    PRIMARY KEY (did, collection),
+    FOREIGN KEY (did) REFERENCES labelers(did)
 );
 
 CREATE TABLE IF NOT EXISTS meta (

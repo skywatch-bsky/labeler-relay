@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -68,23 +69,25 @@ func TestSmoke_BootHealthShutdown(t *testing.T) {
 	healthURL := fmt.Sprintf("http://%s/_health", listenAddr)
 	waitForHTTP(t, healthURL, 5*time.Second)
 
-	// Verify the health response is valid JSON with the expected shape.
+	// Read and close the response before cancel so its connection does not delay Shutdown.
 	resp, err := http.Get(healthURL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var healthBody map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&healthBody))
+	require.NoError(t, resp.Body.Close())
 
 	// Cancel context to trigger graceful shutdown.
 	cancel()
 
-	// Condition-based wait: run() must return within a bounded time.
+	// Allow 8s for run's 5s Shutdown deadline. net/http keeps StateNew connections for 5s (golang/go#22682).
 	select {
 	case err := <-done:
-		// run() returns context.Canceled on graceful shutdown; that is acceptable.
-		if err != nil && err != context.Canceled {
+		// StateNew connections can exhaust the Shutdown deadline without a process hang.
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
 			t.Fatalf("run() returned unexpected error: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout: run() did not shut down within 5 seconds after context cancel")
+	case <-time.After(8 * time.Second):
+		t.Fatal("timeout: run() did not shut down within 8 seconds after context cancel")
 	}
 }

@@ -1,7 +1,9 @@
 package firehose
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"testing"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -9,12 +11,15 @@ import (
 	"github.com/bluesky-social/indigo/lex/util"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multihash"
+	"github.com/stretchr/testify/require"
+
+	"github.com/scarndp/labeler-relay/internal/dagcbor"
 )
 
-// TestExtractLabelerServiceOpsFilters tests that only app.bsky.labeler.service ops are extracted.
-// The test uses minimal CAR data because extraction returns early when no labeler ops are present,
-// so the CAR is never loaded—only the path filtering guard is exercised.
-func TestExtractLabelerServiceOpsFilters(t *testing.T) {
+// Unrelated ops must return before loading the deliberately invalid CAR.
+func TestExtractLabelerDeclarationOpsFilters(t *testing.T) {
+	t.Parallel()
+
 	// Use minimal CAR that won't be loaded (the early-return guard filters ops before CAR load).
 	carData := []byte{1, 0} // minimal CAR header: version 1, 0 roots
 
@@ -30,78 +35,73 @@ func TestExtractLabelerServiceOpsFilters(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
-	if err != nil {
-		t.Fatalf("ExtractLabelerServiceOps failed: %v", err)
-	}
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	require.NoError(t, err)
+	require.Empty(t, ops, "non-declaration ops must be filtered")
+}
 
-	if len(ops) != 0 {
-		t.Fatalf("expected 0 ops (non-labeler posts filtered), got %d", len(ops))
+// TestExtractLabelerDeclarationOpsAllCollections drives extraction through a
+// REAL CAR for each of the three declaration collections: the op is extracted
+// with its collection and the raw record bytes.
+func TestExtractLabelerDeclarationOpsAllCollections(t *testing.T) {
+	t.Parallel()
+
+	for _, collection := range []string{
+		"app.bsky.labeler.service",
+		"town.delve.labeler.service",
+		"so.sprk.labeler.service",
+	} {
+		t.Run(collection, func(t *testing.T) {
+			t.Parallel()
+			const did = "did:plc:extract-real"
+			svc := &bsky.LabelerService{
+				LexiconTypeID: collection,
+				CreatedAt:     "2026-06-02T12:00:00Z",
+				Policies: &bsky.LabelerDefs_LabelerPolicies{
+					LabelValues: []*string{strptr("rude")},
+				},
+			}
+			car, recordCID := buildDeclarationCAR(t, did, collection, "self", svc)
+			lexCID := util.LexLink(recordCID)
+
+			commit := &comatproto.SyncSubscribeRepos_Commit{
+				Repo:   did,
+				Blocks: car,
+				Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
+					// A non-labeler op that must be ignored (its CID need not resolve).
+					{Action: "create", Path: "app.bsky.feed.post/p1", Cid: testCID("post1")},
+					// The real declaration op, resolvable from the CAR by its content CID.
+					{Action: "create", Path: collection + "/self", Cid: &lexCID},
+				},
+			}
+
+			ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+			require.NoError(t, err)
+			require.Len(t, ops, 1)
+
+			got := ops[0]
+			require.Equal(t, did, got.RepoDID)
+			require.Equal(t, "self", got.Rkey)
+			require.Equal(t, "create", got.Action)
+			require.Equal(t, collection, got.Collection)
+			// The record is the raw block bytes: re-marshaling the source
+			// record must reproduce them exactly (byte-faithful passthrough).
+			require.NotNil(t, got.Record)
+			recCBOR := mustMarshalCBOR(t, svc)
+			require.Equal(t, recCBOR, got.Record)
+		})
 	}
 }
 
-// TestExtractLabelerServiceOpsDecodesRecord drives extraction through a REAL CAR:
-// a commit carrying one app.bsky.labeler.service record alongside a non-labeler op.
-// It asserts the labeler op is extracted and its record is decoded with fields intact.
-func TestExtractLabelerServiceOpsDecodesRecord(t *testing.T) {
-	const did = "did:plc:extract-real"
-	svc := &bsky.LabelerService{
-		LexiconTypeID: "app.bsky.labeler.service",
-		CreatedAt:     "2026-06-02T12:00:00Z",
-		Policies: &bsky.LabelerDefs_LabelerPolicies{
-			LabelValues: []*string{strptr("rude")},
-		},
-	}
-	car, recordCID := buildLabelerServiceCAR(t, did, "self", svc)
-	lexCID := util.LexLink(recordCID)
+// TestExtractLabelerDeclarationOpsDelete asserts a delete op yields a
+// LabelerDeclarationOp with a nil Record (no CAR record to load).
+func TestExtractLabelerDeclarationOpsDelete(t *testing.T) {
+	t.Parallel()
 
-	commit := &comatproto.SyncSubscribeRepos_Commit{
-		Repo:   did,
-		Blocks: car,
-		Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
-			// A non-labeler op that must be ignored (its CID need not resolve).
-			{Action: "create", Path: "app.bsky.feed.post/p1", Cid: testCID("post1")},
-			// The real labeler.service op, resolvable from the CAR by its content CID.
-			{Action: "create", Path: "app.bsky.labeler.service/self", Cid: &lexCID},
-		},
-	}
-
-	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
-	if err != nil {
-		t.Fatalf("ExtractLabelerServiceOps: %v", err)
-	}
-	if len(ops) != 1 {
-		t.Fatalf("expected exactly 1 labeler op, got %d", len(ops))
-	}
-	got := ops[0]
-	if got.RepoDID != did {
-		t.Errorf("RepoDID = %q, want %q", got.RepoDID, did)
-	}
-	if got.Rkey != "self" {
-		t.Errorf("Rkey = %q, want self", got.Rkey)
-	}
-	if got.Action != "create" {
-		t.Errorf("Action = %q, want create", got.Action)
-	}
-	if got.Record == nil {
-		t.Fatal("expected decoded record, got nil")
-	}
-	if got.Record.CreatedAt != "2026-06-02T12:00:00Z" {
-		t.Errorf("record CreatedAt = %q, want 2026-06-02T12:00:00Z", got.Record.CreatedAt)
-	}
-	if got.Record.Policies == nil || len(got.Record.Policies.LabelValues) != 1 ||
-		*got.Record.Policies.LabelValues[0] != "rude" {
-		t.Errorf("record Policies not decoded faithfully: %+v", got.Record.Policies)
-	}
-}
-
-// TestExtractLabelerServiceOpsDelete asserts a delete op yields a LabelerServiceOp
-// with a nil Record (no CAR record to load).
-func TestExtractLabelerServiceOpsDelete(t *testing.T) {
 	const did = "did:plc:extract-delete"
 	// A delete commit still carries a (here minimal but valid) CAR; build one with a
 	// throwaway record so LoadRepoFromCAR succeeds, then reference a delete op.
-	car, _ := buildLabelerServiceCAR(t, did, "self", &bsky.LabelerService{
+	car, _ := buildDeclarationCAR(t, did, "app.bsky.labeler.service", "self", &bsky.LabelerService{
 		LexiconTypeID: "app.bsky.labeler.service",
 		CreatedAt:     "2026-06-02T00:00:00Z",
 	})
@@ -112,19 +112,17 @@ func TestExtractLabelerServiceOpsDelete(t *testing.T) {
 			{Action: "delete", Path: "app.bsky.labeler.service/self", Cid: nil},
 		},
 	}
-	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
-	if err != nil {
-		t.Fatalf("ExtractLabelerServiceOps: %v", err)
-	}
-	if len(ops) != 1 {
-		t.Fatalf("expected 1 delete op, got %d", len(ops))
-	}
-	if ops[0].Action != "delete" || ops[0].Record != nil {
-		t.Errorf("delete op = %+v, want Action=delete Record=nil", ops[0])
-	}
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	require.Equal(t, "delete", ops[0].Action)
+	require.Equal(t, "app.bsky.labeler.service", ops[0].Collection)
+	require.Nil(t, ops[0].Record)
 }
 
-func TestExtractLabelerServiceOpsEmptyOps(t *testing.T) {
+func TestExtractLabelerDeclarationOpsEmptyOps(t *testing.T) {
+	t.Parallel()
+
 	carData := []byte{1, 0}
 
 	commit := &comatproto.SyncSubscribeRepos_Commit{
@@ -133,22 +131,19 @@ func TestExtractLabelerServiceOpsEmptyOps(t *testing.T) {
 		Ops:    []*comatproto.SyncSubscribeRepos_RepoOp{},
 	}
 
-	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
-	if err != nil {
-		t.Fatalf("ExtractLabelerServiceOps failed: %v", err)
-	}
-
-	if len(ops) != 0 {
-		t.Fatalf("expected 0 ops for empty commit, got %d", len(ops))
-	}
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	require.NoError(t, err)
+	require.Empty(t, ops)
 }
 
-// TestExtractLabelerServiceOpsPathParsing asserts the rkey is parsed from the op
-// Path through a real CAR-backed extraction (not a non-"self" rkey).
-func TestExtractLabelerServiceOpsPathParsing(t *testing.T) {
+// TestExtractLabelerDeclarationOpsPathParsing asserts that non-self record keys
+// are ignored because the declaration schemas are self-keyed.
+func TestExtractLabelerDeclarationOpsPathParsing(t *testing.T) {
+	t.Parallel()
+
 	const did = "did:plc:rkey-parse"
 	svc := &bsky.LabelerService{LexiconTypeID: "app.bsky.labeler.service", CreatedAt: "2026-06-02T00:00:00Z"}
-	car, recordCID := buildLabelerServiceCAR(t, did, "custom", svc)
+	car, recordCID := buildDeclarationCAR(t, did, "app.bsky.labeler.service", "custom", svc)
 	lexCID := util.LexLink(recordCID)
 
 	commit := &comatproto.SyncSubscribeRepos_Commit{
@@ -159,19 +154,160 @@ func TestExtractLabelerServiceOpsPathParsing(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerServiceOps(context.Background(), commit)
-	if err != nil {
-		t.Fatalf("ExtractLabelerServiceOps: %v", err)
-	}
-	if len(ops) != 1 {
-		t.Fatalf("expected 1 labeler op, got %d", len(ops))
-	}
-	if ops[0].Rkey != "custom" {
-		t.Errorf("rkey = %q, want custom", ops[0].Rkey)
-	}
+	ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	require.NoError(t, err)
+	require.Empty(t, skipped)
+	require.Empty(t, ops)
 }
 
+// TestExtractLabelerDeclarationOpsUnknownFieldsRecord asserts a record
+// carrying unknown/extra fields (hand-encoded, not schema-shaped) is passed
+// through byte-faithfully — extraction validates well-formedness, not
+// lexicon conformance.
+func TestExtractLabelerDeclarationOpsUnknownFieldsRecord(t *testing.T) {
+	t.Parallel()
 
+	const did = "did:plc:extract-unknown"
+	// {"futureField": 7, "$type": "town.delve.labeler.service"}
+	record := []byte{
+		0xa2,
+		0x6b, 'f', 'u', 't', 'u', 'r', 'e', 'F', 'i', 'e', 'l', 'd', // "futureField"
+		0x07,
+		0x65, '$', 't', 'y', 'p', 'e', // "$type"
+		0x78, 0x1a, // text(26): "town.delve.labeler.service"
+		't', 'o', 'w', 'n', '.', 'd', 'e', 'l', 'v', 'e', '.', 'l', 'a', 'b', 'e', 'l', 'e', 'r', '.', 's', 'e', 'r', 'v', 'i', 'c', 'e',
+	}
+	car, recordCID := buildDeclarationCARFromBytes(t, did, "town.delve.labeler.service", "self", record)
+	lexCID := util.LexLink(recordCID)
+
+	commit := &comatproto.SyncSubscribeRepos_Commit{
+		Repo:   did,
+		Blocks: car,
+		Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
+			{Action: "create", Path: "town.delve.labeler.service/self", Cid: &lexCID},
+		},
+	}
+
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	require.Equal(t, record, ops[0].Record)
+}
+
+// Malformed record bytes must skip the op without failing CAR extraction.
+func TestExtractRejectsMalformedRecord(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:extract-malformed"
+	// Well-formed enough for the CAR plumbing, but rejected by the record
+	// validation: map(2) with a single pair.
+	malformed := []byte{0xa2, 0x61, 'a', 0x01}
+	car, recordCID := buildDeclarationCARFromBytes(t, did, "app.bsky.labeler.service", "self", malformed)
+	lexCID := util.LexLink(recordCID)
+
+	commit := &comatproto.SyncSubscribeRepos_Commit{
+		Repo:   did,
+		Blocks: car,
+		Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
+			{Action: "create", Path: "app.bsky.labeler.service/self", Cid: &lexCID},
+		},
+	}
+
+	ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	require.NoError(t, err)
+	require.Empty(t, ops)
+	require.Len(t, skipped, 1)
+	require.Equal(t, "app.bsky.labeler.service/self", skipped[0].Path)
+	require.Error(t, skipped[0].Err)
+	require.Contains(t, skipped[0].Err.Error(), "invalid declaration record")
+}
+
+// Missing CIDs, missing blocks, and oversized records must not discard valid siblings.
+func TestExtractSkipsStructurallyBrokenOps(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:extract-structural"
+	const brokenCollection = "app.bsky.labeler.service"
+	const validCollection = "town.delve.labeler.service"
+	validRecord := mustMarshalCBOR(t, sampleService("2026-06-01T00:00:00Z"))
+	// Arbitrary bytes for the broken op's record: never fetched in the
+	// missing-CID and unknown-block cases.
+	dummyRecord := []byte{0xa1, 0x61, 'a', 0x01}
+
+	// The byte string equals the budget. Map and string headers put the
+	// complete record over the limit.
+	oversize := make([]byte, 0, dagcbor.MaxScanBytes+32)
+	oversize = append(oversize, 0xa1, 0x64, 'd', 'a', 't', 'a', 0x5b)
+	var lenBuf [8]byte
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(dagcbor.MaxScanBytes))
+	oversize = append(oversize, lenBuf[:]...)
+	oversize = append(oversize, make([]byte, dagcbor.MaxScanBytes)...)
+
+	build := func(brokenRecord []byte) *comatproto.SyncSubscribeRepos_Commit {
+		t.Helper()
+		built := buildMultiDeclarationCAR(t, did, []declarationRecordSpec{
+			{Collection: brokenCollection, Rkey: "self", Record: brokenRecord},
+			{Collection: validCollection, Rkey: "self", Record: validRecord},
+		})
+		brokenLex := util.LexLink(built.RecordCIDs[0])
+		validLex := util.LexLink(built.RecordCIDs[1])
+		return &comatproto.SyncSubscribeRepos_Commit{
+			Repo:   did,
+			Blocks: built.CAR,
+			Seq:    1,
+			Rev:    built.Rev,
+			Commit: util.LexLink(built.CommitCID),
+			Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
+				{Action: "create", Path: brokenCollection + "/self", Cid: &brokenLex},
+				{Action: "create", Path: validCollection + "/self", Cid: &validLex},
+			},
+		}
+	}
+
+	t.Run("missing CID", func(t *testing.T) {
+		commit := build(dummyRecord)
+		commit.Ops[0].Cid = nil
+		ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+		require.NoError(t, err, "a per-op structural failure must not error extraction")
+		require.Len(t, ops, 1, "the valid sibling must still be extracted")
+		require.Equal(t, validCollection, ops[0].Collection)
+		require.Len(t, skipped, 1)
+		require.Equal(t, brokenCollection+"/self", skipped[0].Path)
+		require.Contains(t, skipped[0].Err.Error(), "missing CID")
+	})
+
+	t.Run("unknown block CID", func(t *testing.T) {
+		commit := build(dummyRecord)
+		commit.Ops[0].Cid = testCID("block-not-in-car")
+		ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+		require.NoError(t, err, "a per-op structural failure must not error extraction")
+		require.Len(t, ops, 1, "the valid sibling must still be extracted")
+		require.Equal(t, validCollection, ops[0].Collection)
+		require.Len(t, skipped, 1)
+		require.Equal(t, brokenCollection+"/self", skipped[0].Path)
+		require.Contains(t, skipped[0].Err.Error(), "failed to get block")
+	})
+
+	t.Run("record over decode budget", func(t *testing.T) {
+		commit := build(oversize)
+		ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+		require.NoError(t, err, "a per-op structural failure must not error extraction")
+		require.Len(t, ops, 1, "the valid sibling must still be extracted")
+		require.Equal(t, validCollection, ops[0].Collection)
+		require.Len(t, skipped, 1)
+		require.Equal(t, brokenCollection+"/self", skipped[0].Path)
+		require.Contains(t, skipped[0].Err.Error(), "decode budget")
+	})
+}
+
+func mustMarshalCBOR(t *testing.T, svc *bsky.LabelerService) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := svc.MarshalCBOR(&buf); err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	return buf.Bytes()
+}
 
 // LexLink is a type alias for cid.Cid.
 func testCID(id string) *util.LexLink {
@@ -186,4 +322,4 @@ func testCID(id string) *util.LexLink {
 	return &lex
 }
 
-// Real CAR fixtures are built by buildLabelerServiceCAR in testhelpers_test.go.
+// Real CAR fixtures are built by buildDeclarationCAR in testhelpers_test.go.

@@ -19,28 +19,31 @@ import (
 	"github.com/multiformats/go-multihash"
 )
 
-// buildLabelerServiceCAR builds a REAL atproto repo CAR containing one
-// app.bsky.labeler.service record at "app.bsky.labeler.service/<rkey>", plus a
-// signed commit and the MST nodes that reference it — exactly the structure
-// repo.LoadRepoFromCAR expects. It returns the CAR bytes (suitable for a firehose
-// commit's Blocks field) and the real content CID of the record (suitable for the
-// op's Cid). This is the genuine fixture the extract/watcher tests decode through
-// indigo's real CAR-loading path.
-func buildLabelerServiceCAR(t *testing.T, did, rkey string, svc *bsky.LabelerService) ([]byte, cid.Cid) {
+// buildDeclarationCAR includes the signed commit and MST needed by LoadRepoFromCAR.
+// bsky.LabelerService supplies fixtures for all three collections because their
+// schemas share a structure and extraction does not perform typed decoding.
+func buildDeclarationCAR(t *testing.T, did, collection, rkey string, svc *bsky.LabelerService) ([]byte, cid.Cid) {
+	t.Helper()
+	var recBuf bytes.Buffer
+	if err := svc.MarshalCBOR(&recBuf); err != nil {
+		t.Fatalf("marshal labeler service: %v", err)
+	}
+	return buildDeclarationCARFromBytes(t, did, collection, rkey, recBuf.Bytes())
+}
+
+// buildDeclarationCARFromBytes is buildDeclarationCAR for raw record bytes,
+// used by the byte-fidelity and validation tests that hand-encode records.
+func buildDeclarationCARFromBytes(t *testing.T, did, collection, rkey string, record []byte) ([]byte, cid.Cid) {
 	t.Helper()
 	ctx := context.Background()
 	// dag-cbor + sha2-256 is the codec indigo uses for repo blocks.
 	prefix := cid.NewPrefixV1(cid.DagCBOR, multihash.SHA2_256)
 
-	var recBuf bytes.Buffer
-	if err := svc.MarshalCBOR(&recBuf); err != nil {
-		t.Fatalf("marshal labeler service: %v", err)
-	}
-	recordCID, err := prefix.Sum(recBuf.Bytes())
+	recordCID, err := prefix.Sum(record)
 	if err != nil {
 		t.Fatalf("compute record cid: %v", err)
 	}
-	recBlock, err := blocks.NewBlockWithCid(recBuf.Bytes(), recordCID)
+	recBlock, err := blocks.NewBlockWithCid(record, recordCID)
 	if err != nil {
 		t.Fatalf("record block: %v", err)
 	}
@@ -51,7 +54,7 @@ func buildLabelerServiceCAR(t *testing.T, did, rkey string, svc *bsky.LabelerSer
 	}
 	tree := mst.NewEmptyTree()
 	// Insert mutates the tree in place and returns the previous value (unused here).
-	if _, err := tree.Insert([]byte("app.bsky.labeler.service/"+rkey), recordCID); err != nil {
+	if _, err := tree.Insert([]byte(collection+"/"+rkey), recordCID); err != nil {
 		t.Fatalf("mst insert: %v", err)
 	}
 	mstRootPtr, err := tree.WriteDiffBlocks(ctx, bs)
@@ -114,4 +117,104 @@ func buildLabelerServiceCAR(t *testing.T, did, rkey string, svc *bsky.LabelerSer
 		}
 	}
 	return out.Bytes(), recordCID
+}
+
+// Record bytes may be malformed to test validation independently of CAR loading.
+type declarationRecordSpec struct {
+	Collection string
+	Rkey       string
+	Record     []byte
+}
+
+// RecordCIDs follows spec order. Copy Rev and CommitCID into the firehose event:
+// a zero Commit link fails CBOR marshal and closes the stream connection.
+type declarationCARResult struct {
+	CAR        []byte
+	RecordCIDs []cid.Cid
+	CommitCID  cid.Cid
+	Rev        string
+}
+
+// buildMultiDeclarationCAR puts all records in one signed commit and MST,
+// matching an applyWrites call that declares several collections.
+func buildMultiDeclarationCAR(t *testing.T, did string, specs []declarationRecordSpec) declarationCARResult {
+	t.Helper()
+	ctx := context.Background()
+	prefix := cid.NewPrefixV1(cid.DagCBOR, multihash.SHA2_256)
+
+	bs := blockstore.NewBlockstore(datastore.NewMapDatastore())
+	tree := mst.NewEmptyTree()
+	recordCIDs := make([]cid.Cid, len(specs))
+	for i, sp := range specs {
+		recordCID, err := prefix.Sum(sp.Record)
+		if err != nil {
+			t.Fatalf("compute record cid %d: %v", i, err)
+		}
+		recBlock, err := blocks.NewBlockWithCid(sp.Record, recordCID)
+		if err != nil {
+			t.Fatalf("record block %d: %v", i, err)
+		}
+		if err := bs.Put(ctx, recBlock); err != nil {
+			t.Fatalf("put record block %d: %v", i, err)
+		}
+		if _, err := tree.Insert([]byte(sp.Collection+"/"+sp.Rkey), recordCID); err != nil {
+			t.Fatalf("mst insert %d: %v", i, err)
+		}
+		recordCIDs[i] = recordCID
+	}
+	mstRootPtr, err := tree.WriteDiffBlocks(ctx, bs)
+	if err != nil {
+		t.Fatalf("write mst blocks: %v", err)
+	}
+
+	priv, err := atcrypto.GeneratePrivateKeyP256()
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	clk := syntax.NewTIDClock(0)
+	commitRec := repo.Commit{
+		DID:     did,
+		Version: repo.ATPROTO_REPO_VERSION,
+		Data:    *mstRootPtr,
+		Rev:     string(clk.Next()),
+	}
+	if err := commitRec.Sign(priv); err != nil {
+		t.Fatalf("sign commit: %v", err)
+	}
+	var commitBuf bytes.Buffer
+	if err := commitRec.MarshalCBOR(&commitBuf); err != nil {
+		t.Fatalf("marshal commit: %v", err)
+	}
+	commitCID, err := prefix.Sum(commitBuf.Bytes())
+	if err != nil {
+		t.Fatalf("commit cid: %v", err)
+	}
+	commitBlock, err := blocks.NewBlockWithCid(commitBuf.Bytes(), commitCID)
+	if err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+	if err := bs.Put(ctx, commitBlock); err != nil {
+		t.Fatalf("put commit block: %v", err)
+	}
+
+	// See buildDeclarationCARFromBytes for the dag-cbor CID reconstruction.
+	var out bytes.Buffer
+	if err := car.WriteHeader(&car.CarHeader{Roots: []cid.Cid{commitCID}, Version: 1}, &out); err != nil {
+		t.Fatalf("car header: %v", err)
+	}
+	keys, err := bs.AllKeysChan(ctx)
+	if err != nil {
+		t.Fatalf("all keys: %v", err)
+	}
+	for c := range keys {
+		dagCID := cid.NewCidV1(cid.DagCBOR, c.Hash())
+		blk, err := bs.Get(ctx, dagCID)
+		if err != nil {
+			t.Fatalf("get block %s: %v", dagCID, err)
+		}
+		if err := carutil.LdWrite(&out, dagCID.Bytes(), blk.RawData()); err != nil {
+			t.Fatalf("car write block: %v", err)
+		}
+	}
+	return declarationCARResult{CAR: out.Bytes(), RecordCIDs: recordCIDs, CommitCID: commitCID, Rev: commitRec.Rev}
 }

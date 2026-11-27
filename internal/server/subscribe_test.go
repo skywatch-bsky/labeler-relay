@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	bsky "github.com/bluesky-social/indigo/api/bsky"
 	"github.com/gorilla/websocket"
 	"github.com/scarndp/labeler-relay/internal/server"
 	"github.com/scarndp/labeler-relay/internal/store"
@@ -117,10 +116,9 @@ func serviceEvent(did string) store.IngestEvent {
 	return store.IngestEvent{
 		Kind:       "service",
 		LabelerDID: did,
-		Record: &bsky.LabelerService{
-			CreatedAt: "2026-06-01T00:00:00Z",
-			Policies:  &bsky.LabelerDefs_LabelerPolicies{},
-		},
+		Op:         "create",
+		Collection: "app.bsky.labeler.service",
+		Record:     []byte{0xa1, 0x61, 'a', 0x01},
 	}
 }
 
