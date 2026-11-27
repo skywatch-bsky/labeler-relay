@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -133,6 +134,12 @@ func validate(cfg Config) error {
 	}
 	if cfg.QueryRateLimit.PerHour <= 0 {
 		return fmt.Errorf("query_rate_limit.per_hour must be positive, got %d", cfg.QueryRateLimit.PerHour)
+	}
+	// The watcher dials this URL as given, so anything it cannot dial must
+	// fail here rather than on every dial after startup.
+	u, err := url.Parse(cfg.FirehoseURL)
+	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" {
+		return fmt.Errorf("firehose_url must be a ws:// or wss:// URL, got %q", cfg.FirehoseURL)
 	}
 	return nil
 }
