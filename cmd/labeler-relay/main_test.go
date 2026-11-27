@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
-	"encoding/json"
 	"net/http"
 	"testing"
 	"time"

@@ -73,17 +73,18 @@ func TestSeamBackfillLiveSeqOrdering(t *testing.T) {
 // for PlaybackFrames) is delivered EXACTLY ONCE.
 //
 // Deterministic mechanism — no timing/sleep races:
-//   Pre-persist 1..80 (a large backlog). StreamFrom(since=0, bufSize=16).
-//   The seam goroutine starts PlaybackFrames and forwards events to out
-//   (capacity 16). After 16 events fill out, the callback blocks on "out <- e"
-//   because the test hasn't drained yet. Backfill is provably mid-drain.
-//   While blocked, PersistIngest 81..83. These broadcast to the Hub's live
-//   channel (capacity 16, plenty of room since it's not full — only newly
-//   persisted events go there) AND are now in the DB (visible to the still-
-//   running PlaybackFrames query under WAL). Then drain out; backfill resumes
-//   (17..80), switches to live, dedup boundary drops any live events with
-//   RelaySeq <= lastBackfill (80), and forwards 81..83. Assert 1..83 exactly
-//   once, ascending.
+//
+//	Pre-persist 1..80 (a large backlog). StreamFrom(since=0, bufSize=16).
+//	The seam goroutine starts PlaybackFrames and forwards events to out
+//	(capacity 16). After 16 events fill out, the callback blocks on "out <- e"
+//	because the test hasn't drained yet. Backfill is provably mid-drain.
+//	While blocked, PersistIngest 81..83. These broadcast to the Hub's live
+//	channel (capacity 16, plenty of room since it's not full — only newly
+//	persisted events go there) AND are now in the DB (visible to the still-
+//	running PlaybackFrames query under WAL). Then drain out; backfill resumes
+//	(17..80), switches to live, dedup boundary drops any live events with
+//	RelaySeq <= lastBackfill (80), and forwards 81..83. Assert 1..83 exactly
+//	once, ascending.
 func TestSeamDuringBackfillPersist(t *testing.T) {
 	p, cleanup := testPersist(t)
 	defer cleanup()

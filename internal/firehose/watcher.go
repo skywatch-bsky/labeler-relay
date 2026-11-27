@@ -201,7 +201,10 @@ func (w *FirehoseWatcher) handleEvent(ctx context.Context, evt *stream.XRPCStrea
 // best-effort, non-fatal policy: they record the error in the registry and
 // continue, tracking no declaration and emitting no event.
 func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) error {
-	ops, err := ExtractLabelerDeclarationOps(ctx, commit)
+	ops, skipped, err := ExtractLabelerDeclarationOps(ctx, commit)
+	for _, item := range skipped {
+		w.log.Warn("skipping malformed declaration record", "path", item.Path, "err", item.Err)
+	}
 	if err != nil {
 		w.log.Error("extract failed", "err", err)
 		// Record the error but don't crash.
@@ -235,18 +238,25 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				continue
 			}
 
-			if _, err := w.persist.ApplyServiceOp(ctx, store.ServiceOp{
+			res, err := w.persist.ApplyServiceOp(ctx, store.ServiceOp{
 				Op:            op.Action,
 				DID:           op.RepoDID,
 				Collection:    op.Collection,
 				Record:        op.Record,
 				Endpoint:      endpoint,
 				AutoSubscribe: w.autoSubscribe,
-			}); err != nil {
+				CommitSeq:     commit.Seq,
+				Rkey:          op.Rkey,
+			})
+			if err != nil {
 				// The whole op rolled back; the commit is incomplete and must
 				// not count as processed.
 				w.log.Error("apply service op failed", "did", op.RepoDID, "err", err)
 				return err
+			}
+			if res.Skipped {
+				w.log.Debug("replay of already-applied declaration op", "did", op.RepoDID, "collection", op.Collection)
+				continue
 			}
 			// A registry row and/or an event changed: reconcile the slurper.
 			w.poke()
@@ -256,6 +266,8 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				DID:        op.RepoDID,
 				Collection: op.Collection,
 				Record:     nil,
+				CommitSeq:  commit.Seq,
+				Rkey:       op.Rkey,
 			})
 			if err != nil {
 				w.log.Error("apply service op failed", "did", op.RepoDID, "err", err)

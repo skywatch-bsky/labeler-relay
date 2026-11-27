@@ -59,11 +59,11 @@ func TestValidateRecordCBOR(t *testing.T) {
 	t.Parallel()
 
 	validNested := []byte{
-		0xa4, // map(4)
+		0xa4,                // map(4)
 		0x63, 'n', 'u', 'm', // "num"
 		0x18, 0x2a, // uint(42)
 		0x62, 'n', 'g', // "ng"
-		0x20, // negative int(-1)
+		0x20,           // negative int(-1)
 		0x62, 'a', 'r', // "ar"
 		0x82, 0xf4, 0xf5, // array(false, true)
 		0x64, 'm', 'a', 'p', 's', // "maps"

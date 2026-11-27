@@ -176,7 +176,7 @@ The JSON below illustrates decoded bodies, not JSON messages sent over the socke
 
 The full declaration record accompanies create and update events as the raw CBOR block from the labeler's repository, passed through byte-faithfully: its bytes are exactly the upstream block, never decoded and re-encoded, including any fields this relay does not know. Frames recorded before multi-collection support carry no `collection`; those records are `app.bsky.labeler.service`.
 
-A discovered labeler that deletes its last declaration record is considered inactive: the relay disables it and unsubscribes. A later declaration re-enables it. A labeler an operator disabled through the admin API stays disabled.
+A discovered labeler that deletes its last declaration record is considered inactive: the relay disables it and unsubscribes. A later declaration re-enables it when it is the first tracked declaration and auto-subscribe is enabled. An operator-disabled labeler that still has a tracked declaration stays disabled; manual labelers are never auto-enabled.
 
 **`#info`** reports an outdated cursor:
 

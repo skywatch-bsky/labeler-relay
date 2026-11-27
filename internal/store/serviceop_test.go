@@ -149,3 +149,70 @@ func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), head, "a skipped op writes no event")
 }
+
+// TestApplyServiceOpDedupsReplay verifies the exactly-once contract across
+// replays: an op whose event already exists (same upstream commit seq, DID,
+// collection, rkey, and action) is skipped with no writes at all — no second
+// event, no relay seq, not even a declared_at advance — while a different
+// upstream op still applies.
+func TestApplyServiceOpDedupsReplay(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "dedup.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	reg := store.NewLabelerRegistry(s)
+	persist := store.NewLabelPersist(s)
+
+	const did = "did:plc:dedup"
+	const collection = "app.bsky.labeler.service"
+	record := []byte{0xa1, 0x61, 'a', 0x01}
+
+	op := store.ServiceOp{
+		Op: "create", DID: did, Collection: collection, Rkey: "self",
+		Record: record, Endpoint: "dedup.example.com", AutoSubscribe: true,
+		CommitSeq: 7,
+	}
+
+	res, err := persist.ApplyServiceOp(ctx, op)
+	require.NoError(t, err)
+	require.False(t, res.Skipped)
+	require.Equal(t, int64(1), res.Seq)
+
+	row, found, err := reg.Get(ctx, did)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotNil(t, row.DeclaredAt)
+	declaredBefore := *row.DeclaredAt
+
+	// The identical upstream op replayed: skipped, nothing written.
+	res, err = persist.ApplyServiceOp(ctx, op)
+	require.NoError(t, err)
+	require.True(t, res.Skipped, "a replayed upstream op must be deduplicated")
+	require.Zero(t, res.Seq)
+
+	var events int
+	require.NoError(t, s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM events WHERE kind='service' AND labeler_did=?`, did).Scan(&events))
+	require.Equal(t, 1, events, "the replay must not insert a second event")
+
+	head, err := persist.Head(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), head, "the replay must consume no relay seq")
+
+	row, found, err = reg.Get(ctx, did)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, row.Enabled)
+	require.NotNil(t, row.DeclaredAt)
+	require.Equal(t, declaredBefore, *row.DeclaredAt, "a deduplicated replay must not advance declared_at")
+
+	// A different upstream op still applies: the dedup key includes the
+	// commit sequence and the collection.
+	other := op
+	other.CommitSeq = 8
+	other.Collection = "town.delve.labeler.service"
+	res, err = persist.ApplyServiceOp(ctx, other)
+	require.NoError(t, err)
+	require.False(t, res.Skipped)
+	require.Equal(t, int64(2), res.Seq)
+}

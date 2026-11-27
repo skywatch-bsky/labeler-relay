@@ -54,6 +54,10 @@ func TestDocs_QueryContractDocumented(t *testing.T) {
 		"README must document the byte-faithful record passthrough")
 	require.Contains(t, text, "deletes its last declaration record is considered inactive",
 		"README must document the inactive-on-declaration-removal behavior")
+	require.Contains(t, text, "first tracked declaration and auto-subscribe is enabled",
+		"README must qualify zero-to-one re-enable behavior")
+	require.Contains(t, text, "operator-disabled labeler that still has a tracked declaration stays disabled",
+		"README must document the operator-disable exception")
 
 	serverDoc, err := os.ReadFile("../../internal/server/CLAUDE.md")
 	require.NoError(t, err)

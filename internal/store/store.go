@@ -136,6 +136,13 @@ func migrate(db *sql.DB) error {
 	}
 	// id only: fresh (schema.sql) or already migrated — no identity mutation.
 
+	// Add replay deduplication identity to events on existing databases, then
+	// always ensure its unique index exists. NULL keys remain allowed for
+	// labels-path events and do not conflict in SQLite.
+	if err := migrateEventDedup(db); err != nil {
+		return err
+	}
+
 	// Unconditional belt-and-braces: fresh databases reach this without any
 	// identity mutation above, so the index must be created here for them
 	// too, and any surviving legacy index must go.
@@ -206,6 +213,41 @@ func migrate(db *sql.DB) error {
 	return migrateEndpoints(db)
 }
 
+// migrateEventDedup adds the optional upstream-op key and its uniqueness
+// constraint to both fresh and existing databases.
+func migrateEventDedup(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(events)`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect events schema: %w", err)
+	}
+	hasDedupKey := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, colType string
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan events schema: %w", err)
+		}
+		if name == "dedup_key" {
+			hasDedupKey = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("failed to inspect events schema: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("failed to close events schema rows: %w", err)
+	}
+	stmts := []string{}
+	if !hasDedupKey {
+		stmts = append(stmts, `ALTER TABLE events ADD COLUMN dedup_key TEXT`)
+	}
+	stmts = append(stmts, `CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)`)
+	return execInTx(db, "event dedup", stmts)
+}
+
 // execInTx runs the given statements inside one transaction (BeginTx, not
 // standalone BEGIN/COMMIT Execs, because db is a pooled *sql.DB and separate
 // Execs could land on different connections). On any failure the whole step
@@ -239,7 +281,6 @@ func rawGetMeta(db *sql.DB, key string) (string, bool, error) {
 	}
 	return value, true, nil
 }
-
 
 func migrateEndpoints(db *sql.DB) error {
 	tx, err := db.BeginTx(context.Background(), nil)

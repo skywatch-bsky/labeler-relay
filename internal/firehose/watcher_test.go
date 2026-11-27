@@ -118,6 +118,33 @@ func sampleService(createdAt string) *bsky.LabelerService {
 
 func strptr(s string) *string { return &s }
 
+// multiDeclarationCommit builds a SyncSubscribeRepos_Commit carrying one REAL
+// CAR with one create op per spec — the multi-op-per-commit shape
+// com.atproto.repo.applyWrites produces (e.g. a labeler declaring in two
+// collections in one commit), each op referencing its record by its real
+// content CID.
+func multiDeclarationCommit(t *testing.T, did string, seq int64, specs []declarationRecordSpec) *comatproto.SyncSubscribeRepos_Commit {
+	t.Helper()
+	built := buildMultiDeclarationCAR(t, did, specs)
+	ops := make([]*comatproto.SyncSubscribeRepos_RepoOp, len(specs))
+	for i, sp := range specs {
+		lexCID := util.LexLink(built.RecordCIDs[i])
+		ops[i] = &comatproto.SyncSubscribeRepos_RepoOp{
+			Action: "create",
+			Path:   sp.Collection + "/" + sp.Rkey,
+			Cid:    &lexCID,
+		}
+	}
+	return &comatproto.SyncSubscribeRepos_Commit{
+		Repo:   did,
+		Blocks: built.CAR,
+		Seq:    seq,
+		Rev:    built.Rev,
+		Commit: util.LexLink(built.CommitCID),
+		Ops:    ops,
+	}
+}
+
 func countServiceEvents(t *testing.T, s *store.Store, did string) int {
 	t.Helper()
 	var n int
@@ -785,6 +812,187 @@ func TestWatcherDeleteReplaysAfterNonContextFailure(t *testing.T) {
 	}
 	if w.pendingSeq == nil || *w.pendingSeq != 2 {
 		t.Fatalf("the replayed commit must stage its cursor: pending=%v, want 2", w.pendingSeq)
+	}
+}
+
+// TestWatcherMultiOpCommitReplayDoesNotDuplicate pins the replay-dedup
+// contract for multi-op commits: when one commit carries several declaration
+// ops and a LATER op fails mid-commit, the redial replay must not re-emit the
+// earlier op's already-committed #service event — exactly one event per
+// upstream op across redials and restarts.
+func TestWatcherMultiOpCommitReplayDoesNotDuplicate(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:multi-op-replay"
+	const endpoint = "labeler.example.com"
+
+	w, s, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
+	w.SetCursorFlushThresholds(1_000_000, time.Hour)
+	w.lastFlushTime = time.Now()
+	ctx := context.Background()
+
+	appSvc := sampleService("2026-06-01T00:00:00Z")
+	townSvc := sampleService("2026-06-02T00:00:00Z")
+	townSvc.LexiconTypeID = "town.delve.labeler.service"
+	commit := multiDeclarationCommit(t, did, 1, []declarationRecordSpec{
+		{Collection: "app.bsky.labeler.service", Rkey: "self", Record: mustMarshalCBOR(t, appSvc)},
+		{Collection: "town.delve.labeler.service", Rkey: "self", Record: mustMarshalCBOR(t, townSvc)},
+	})
+
+	// Block only the SECOND op's event write. The trigger matches its dedup
+	// key, which is deterministic: svc:<seq>/<did>/<collection>/<rkey>/<op>.
+	blockTown := func(block bool) {
+		t.Helper()
+		stmt := `DROP TRIGGER IF EXISTS block_town_event`
+		if block {
+			stmt = `CREATE TRIGGER block_town_event BEFORE INSERT ON events
+				WHEN NEW.dedup_key = 'svc:1/` + did + `/town.delve.labeler.service/self/create'
+				BEGIN
+					SELECT RAISE(ABORT, 'test: town declaration event insert blocked');
+				END;`
+		}
+		if _, err := s.DB().Exec(stmt); err != nil {
+			t.Fatalf("trigger install: %v", err)
+		}
+	}
+	blockTown(true)
+
+	// The first op commits its own transaction; the second fails, so the
+	// commit is incomplete and must not be staged.
+	err := w.handleCommit(ctx, commit)
+	if err == nil {
+		t.Fatal("the multi-op commit must fail while the second op's event write is blocked")
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the failure must be a non-context store error, got %v", err)
+	}
+	if w.pendingSeq != nil {
+		t.Fatalf("failed commit must not stage its cursor: pending=%v, want none", *w.pendingSeq)
+	}
+	if w.commitCount != 0 {
+		t.Fatalf("failed commit must not count toward the flush threshold: count=%d", w.commitCount)
+	}
+	if n := countServiceEvents(t, s, did); n != 1 {
+		t.Fatalf("only the first op's event may exist, got %d", n)
+	}
+	if got := declarationsFor(t, w, did); len(got) != 1 || got[0] != "app.bsky.labeler.service" {
+		t.Fatalf("only the first op's declaration may be tracked, got %v", got)
+	}
+
+	// Replay: the first op is deduplicated (no second event for it); the
+	// second op completes. Exactly one event per upstream op.
+	blockTown(false)
+	if err := w.handleCommit(ctx, commit); err != nil {
+		t.Fatalf("replayed multi-op commit: %v", err)
+	}
+	if n := countServiceEvents(t, s, did); n != 2 {
+		t.Fatalf("the replay must not duplicate the first op's event: %d events, want 2", n)
+	}
+	if n := countServiceEventsOp(t, s, did, "create"); n != 2 {
+		t.Fatalf("exactly one create event per op, got %d", n)
+	}
+	if got := declarationsFor(t, w, did); len(got) != 2 {
+		t.Fatalf("both declarations must be tracked after the replay, got %v", got)
+	}
+	lab, found, err := w.registry.Get(ctx, did)
+	if err != nil || !found || !lab.Enabled || lab.Endpoint != endpoint {
+		t.Fatalf("labeler row wrong after replay: found=%v err=%v row=%+v", found, err, lab)
+	}
+	if w.pendingSeq == nil || *w.pendingSeq != 1 {
+		t.Fatalf("the replayed commit must stage its cursor: pending=%v, want 1", w.pendingSeq)
+	}
+}
+
+// TestWatcherMalformedRecordSkipsOnlyThatOp pins the per-op granularity of
+// record validation: a malformed declaration record in one op is skipped and
+// logged, and any VALID sibling op in the same commit still registers and
+// emits its event — the commit counts as processed.
+func TestWatcherMalformedRecordSkipsOnlyThatOp(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:malformed-sibling"
+	const endpoint = "labeler.example.com"
+
+	w, s, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
+	w.SetCursorFlushThresholds(1_000_000, time.Hour)
+	w.lastFlushTime = time.Now()
+	ctx := context.Background()
+
+	// One valid app.bsky record and one malformed town.delve record in one
+	// commit: a map header claiming one pair with no value bytes.
+	commit := multiDeclarationCommit(t, did, 1, []declarationRecordSpec{
+		{Collection: "app.bsky.labeler.service", Rkey: "self", Record: mustMarshalCBOR(t, sampleService("2026-06-01T00:00:00Z"))},
+		{Collection: "town.delve.labeler.service", Rkey: "self", Record: []byte{0xa1, 0x61, 'k'}},
+	})
+
+	if err := w.handleCommit(ctx, commit); err != nil {
+		t.Fatalf("a malformed sibling record must not fail the commit: %v", err)
+	}
+	if n := countServiceEvents(t, s, did); n != 1 {
+		t.Fatalf("only the valid op's event may exist, got %d", n)
+	}
+	if got := declarationsFor(t, w, did); len(got) != 1 || got[0] != "app.bsky.labeler.service" {
+		t.Fatalf("only the valid op's declaration may be tracked, got %v", got)
+	}
+	lab, found, err := w.registry.Get(ctx, did)
+	if err != nil || !found || !lab.Enabled || lab.Endpoint != endpoint {
+		t.Fatalf("the valid sibling must register: found=%v err=%v row=%+v", found, err, lab)
+	}
+	if w.pendingSeq == nil || *w.pendingSeq != 1 {
+		t.Fatalf("the commit must count as processed: pending=%v, want 1", w.pendingSeq)
+	}
+}
+
+// TestWatcherNonSelfDeleteDoesNotDisable pins the self-keyed declaration
+// contract: a delete at a record key other than "self" is not a declaration
+// op (all three declaration schemas are literal:self), so it must not remove
+// the tracked self declaration or disable the labeler.
+func TestWatcherNonSelfDeleteDoesNotDisable(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:nonself-delete"
+	const endpoint = "labeler.example.com"
+	const collection = "app.bsky.labeler.service"
+
+	w, s, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
+	w.SetCursorFlushThresholds(1_000_000, time.Hour)
+	w.lastFlushTime = time.Now()
+	ctx := context.Background()
+
+	if err := w.handleCommit(ctx, serviceCommit(t, did, "create", 1, sampleService("2026-06-01T00:00:00Z"))); err != nil {
+		t.Fatalf("handleCommit(create): %v", err)
+	}
+
+	// A delete at rkey "custom": the CAR is real, but the op is not a
+	// declaration op, so it is filtered before any record access.
+	car, _ := buildDeclarationCAR(t, did, collection, "custom", sampleService("2026-06-01T00:00:00Z"))
+	nonSelf := &comatproto.SyncSubscribeRepos_Commit{
+		Repo:   did,
+		Blocks: car,
+		Seq:    2,
+		Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
+			{Action: "delete", Path: collection + "/custom"},
+		},
+	}
+	if err := w.handleCommit(ctx, nonSelf); err != nil {
+		t.Fatalf("handleCommit(non-self delete): %v", err)
+	}
+
+	lab, found, err := w.registry.Get(ctx, did)
+	if err != nil || !found {
+		t.Fatalf("labeler row missing: found=%v err=%v", found, err)
+	}
+	if !lab.Enabled {
+		t.Error("a non-self delete must not disable the labeler")
+	}
+	if got := declarationsFor(t, w, did); len(got) != 1 || got[0] != collection {
+		t.Fatalf("the self declaration must survive a non-self delete, got %v", got)
+	}
+	if n := countServiceEvents(t, s, did); n != 1 {
+		t.Fatalf("a non-self delete must not emit an event, got %d", n)
+	}
+	if w.pendingSeq == nil || *w.pendingSeq != 2 {
+		t.Fatalf("the commit must count as processed: pending=%v, want 2", w.pendingSeq)
 	}
 }
 

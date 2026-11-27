@@ -855,3 +855,80 @@ func TestDeclaredAtOnlyMovesOnDeclarationOps(t *testing.T) {
 		t.Fatalf("tracked delete must advance declared_at past the sentinel, got %v", got.DeclaredAt)
 	}
 }
+
+// TestListWithDeclarationsSingleSnapshot verifies the combined reads serve
+// labelers and their declarations from ONE database snapshot: a write that
+// disables a labeler and removes its declaration, committed between two
+// reads, can never produce a torn view (enabled with no declarations, or
+// disabled with declarations) — the read sees the old state whole, then the
+// new state whole.
+func TestListWithDeclarationsSingleSnapshot(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "snapshot.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+	reg := store.NewLabelerRegistry(s)
+	persist := store.NewLabelPersist(s)
+
+	const did = "did:plc:snapshot"
+	if _, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
+		Op: "create", DID: did, Collection: "app.bsky.labeler.service", Rkey: "self",
+		Record: []byte{0xa1, 0x61, 'a', 0x01}, Endpoint: "snapshot.example.com", AutoSubscribe: true,
+		CommitSeq: 1,
+	}); err != nil {
+		t.Fatalf("seed declaration op: %v", err)
+	}
+
+	// Hold an uncommitted write transaction that disables the labeler and
+	// removes its declaration.
+	tx, err := s.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin write tx: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE labelers SET enabled = 0 WHERE did = ?`, did); err != nil {
+		t.Fatalf("stage disable: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM labeler_declarations WHERE did = ?`, did); err != nil {
+		t.Fatalf("stage declaration removal: %v", err)
+	}
+
+	// While the write is uncommitted, the combined reads see the last
+	// committed snapshot — rows and declarations from the same one.
+	labelers, declarations, err := reg.ListWithDeclarations(ctx)
+	if err != nil {
+		t.Fatalf("ListWithDeclarations during write: %v", err)
+	}
+	if len(labelers) != 1 || !labelers[0].Enabled {
+		t.Fatalf("snapshot read: labelers=%+v, want the committed enabled row", labelers)
+	}
+	if got := declarations[did]; len(got) != 1 || got[0] != "app.bsky.labeler.service" {
+		t.Fatalf("snapshot read: declarations=%v, want the committed declaration", got)
+	}
+	row, decs, found, err := reg.GetWithDeclarations(ctx, did)
+	if err != nil || !found || !row.Enabled || len(decs) != 1 {
+		t.Fatalf("snapshot Get: found=%v err=%v enabled=%v decs=%v", found, err, row.Enabled, decs)
+	}
+
+	// Commit the write; both reads now see the new state together.
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit write tx: %v", err)
+	}
+	labelers, declarations, err = reg.ListWithDeclarations(ctx)
+	if err != nil {
+		t.Fatalf("ListWithDeclarations after write: %v", err)
+	}
+	if len(labelers) != 1 || labelers[0].Enabled {
+		t.Fatalf("post-commit read: labelers=%+v, want the disabled row", labelers)
+	}
+	if got := declarations[did]; len(got) != 0 {
+		t.Fatalf("post-commit read: declarations=%v, want none", got)
+	}
+	row, decs, found, err = reg.GetWithDeclarations(ctx, did)
+	if err != nil || !found || row.Enabled || len(decs) != 0 {
+		t.Fatalf("post-commit Get: found=%v err=%v enabled=%v decs=%v", found, err, row.Enabled, decs)
+	}
+}

@@ -35,7 +35,7 @@ func TestExtractLabelerDeclarationOpsFilters(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
 	require.NoError(t, err)
 	require.Empty(t, ops, "non-declaration ops must be filtered")
 }
@@ -75,7 +75,7 @@ func TestExtractLabelerDeclarationOpsAllCollections(t *testing.T) {
 				},
 			}
 
-			ops, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+			ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
 			require.NoError(t, err)
 			require.Len(t, ops, 1)
 
@@ -112,7 +112,7 @@ func TestExtractLabelerDeclarationOpsDelete(t *testing.T) {
 			{Action: "delete", Path: "app.bsky.labeler.service/self", Cid: nil},
 		},
 	}
-	ops, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
 	require.NoError(t, err)
 	require.Len(t, ops, 1)
 	require.Equal(t, "delete", ops[0].Action)
@@ -131,13 +131,13 @@ func TestExtractLabelerDeclarationOpsEmptyOps(t *testing.T) {
 		Ops:    []*comatproto.SyncSubscribeRepos_RepoOp{},
 	}
 
-	ops, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
 	require.NoError(t, err)
 	require.Empty(t, ops)
 }
 
-// TestExtractLabelerDeclarationOpsPathParsing asserts the rkey is parsed from
-// the op Path through a real CAR-backed extraction (not a non-"self" rkey).
+// TestExtractLabelerDeclarationOpsPathParsing asserts that non-self record keys
+// are ignored because the declaration schemas are self-keyed.
 func TestExtractLabelerDeclarationOpsPathParsing(t *testing.T) {
 	t.Parallel()
 
@@ -154,10 +154,10 @@ func TestExtractLabelerDeclarationOpsPathParsing(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
 	require.NoError(t, err)
-	require.Len(t, ops, 1)
-	require.Equal(t, "custom", ops[0].Rkey)
+	require.Empty(t, skipped)
+	require.Empty(t, ops)
 }
 
 // TestExtractLabelerDeclarationOpsUnknownFieldsRecord asserts a record
@@ -188,7 +188,7 @@ func TestExtractLabelerDeclarationOpsUnknownFieldsRecord(t *testing.T) {
 		},
 	}
 
-	ops, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	ops, _, err := ExtractLabelerDeclarationOps(context.Background(), commit)
 	require.NoError(t, err)
 	require.Len(t, ops, 1)
 	require.Equal(t, record, ops[0].Record)
@@ -215,9 +215,13 @@ func TestExtractRejectsMalformedRecord(t *testing.T) {
 		},
 	}
 
-	_, err := ExtractLabelerDeclarationOps(context.Background(), commit)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid declaration record")
+	ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+	require.NoError(t, err)
+	require.Empty(t, ops)
+	require.Len(t, skipped, 1)
+	require.Equal(t, "app.bsky.labeler.service/self", skipped[0].Path)
+	require.Error(t, skipped[0].Err)
+	require.Contains(t, skipped[0].Err.Error(), "invalid declaration record")
 }
 
 // mustMarshalCBOR marshals a record to CBOR bytes for byte-equality checks.

@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS events (
     labeler_did  TEXT    NOT NULL,
     upstream_seq INTEGER,
     frame_cbor   BLOB    NOT NULL,
-    ingest_ts    INTEGER NOT NULL -- milliseconds since epoch (prune cutoff)
+    ingest_ts    INTEGER NOT NULL, -- milliseconds since epoch (prune cutoff)
+    dedup_key    TEXT -- upstream-op identity svc:<commitSeq>/<did>/<collection>/<rkey>/<op> for replay dedup; NULL for labels-path events
 );
 CREATE INDEX IF NOT EXISTS idx_events_ingest_ts ON events (ingest_ts);
 

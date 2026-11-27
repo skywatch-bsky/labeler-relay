@@ -142,16 +142,9 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	labelers, err := s.registry.List(ctx)
+	labelers, declarations, err := s.registry.ListWithDeclarations(ctx)
 	if err != nil {
-		s.log.Error("query: failed to list labelers", "err", err)
-		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
-		return
-	}
-
-	declarations, err := s.registry.ListDeclarations(ctx)
-	if err != nil {
-		s.log.Error("query: failed to list declarations", "err", err)
+		s.log.Error("query: failed to read labelers and declarations", "err", err)
 		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
 		return
 	}
@@ -216,21 +209,14 @@ func (s *Server) HandleGetLabeler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	labeler, found, err := s.registry.Get(ctx, did.String())
+	labeler, declarations, found, err := s.registry.GetWithDeclarations(ctx, did.String())
 	if err != nil {
-		s.log.Error("query: failed to read labeler", "err", err)
+		s.log.Error("query: failed to read labeler and declarations", "err", err)
 		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
 		return
 	}
 	if !found {
 		writeXRPCError(w, http.StatusBadRequest, "InvalidRequest", "labeler not found")
-		return
-	}
-
-	declarations, err := s.registry.DeclarationsFor(ctx, did.String())
-	if err != nil {
-		s.log.Error("query: failed to read declarations", "err", err)
-		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
 		return
 	}
 

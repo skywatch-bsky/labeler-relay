@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	didMod     = "did:plc:ar7c4by46qjdydhdevvrndac" // mod.bsky.app
+	didMod      = "did:plc:ar7c4by46qjdydhdevvrndac" // mod.bsky.app
 	didSkywatch = "did:plc:e4elbtctnfqocyfcml6h2lf7" // ozone.skywatch.blue
 
 	// collectDeadline is the maximum time to wait for at least one label from

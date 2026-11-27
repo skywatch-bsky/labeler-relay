@@ -252,6 +252,95 @@ func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 	return labelers, nil
 }
 
+// ListWithDeclarations returns the id-ordered labelers and their declarations
+// from one SQLite read snapshot.
+func (r *LabelerRegistry) ListWithDeclarations(ctx context.Context) ([]Labeler, map[string][]string, error) {
+	tx, err := r.store.DB().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to begin labeler snapshot: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT `+labelerColumns+` FROM labelers ORDER BY id ASC`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list labelers: %w", err)
+	}
+	var labelers []Labeler
+	for rows.Next() {
+		l, scanErr := scanLabeler(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("failed to scan labeler: %w", scanErr)
+		}
+		labelers = append(labelers, l)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, fmt.Errorf("error iterating labelers: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close labelers: %w", err)
+	}
+	declRows, err := tx.QueryContext(ctx, `SELECT did, collection FROM labeler_declarations ORDER BY did ASC, collection ASC`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list declarations: %w", err)
+	}
+	declarations := make(map[string][]string)
+	for declRows.Next() {
+		var did, collection string
+		if err := declRows.Scan(&did, &collection); err != nil {
+			declRows.Close()
+			return nil, nil, fmt.Errorf("failed to scan declaration: %w", err)
+		}
+		declarations[did] = append(declarations[did], collection)
+	}
+	if err := declRows.Err(); err != nil {
+		declRows.Close()
+		return nil, nil, fmt.Errorf("error iterating declarations: %w", err)
+	}
+	if err := declRows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close declarations: %w", err)
+	}
+	return labelers, declarations, nil
+}
+
+// GetWithDeclarations returns one labeler and its declaration collections
+// from one SQLite read snapshot, preserving Get's found semantics.
+func (r *LabelerRegistry) GetWithDeclarations(ctx context.Context, did string) (Labeler, []string, bool, error) {
+	tx, err := r.store.DB().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to begin labeler snapshot: %w", err)
+	}
+	defer tx.Rollback()
+	labeler, err := scanLabeler(tx.QueryRowContext(ctx, `SELECT `+labelerColumns+` FROM labelers WHERE did = ?`, did))
+	if err == sql.ErrNoRows {
+		return Labeler{}, []string{}, false, nil
+	}
+	if err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to get labeler: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT collection FROM labeler_declarations WHERE did = ? ORDER BY collection ASC`, did)
+	if err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to list declarations: %w", err)
+	}
+	declarations := []string{}
+	for rows.Next() {
+		var collection string
+		if err := rows.Scan(&collection); err != nil {
+			rows.Close()
+			return Labeler{}, nil, false, fmt.Errorf("failed to scan declaration: %w", err)
+		}
+		declarations = append(declarations, collection)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Labeler{}, nil, false, fmt.Errorf("error iterating declarations: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return Labeler{}, nil, false, fmt.Errorf("failed to close declarations: %w", err)
+	}
+	return labeler, declarations, true, nil
+}
+
 func (r *LabelerRegistry) ListEnabled(ctx context.Context) ([]Labeler, error) {
 	// ORDER BY did is retained deliberately: ListEnabled feeds Reconcile's
 	// internal set semantics, where order is irrelevant.

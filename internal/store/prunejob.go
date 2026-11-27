@@ -14,7 +14,7 @@ type PruneJob struct {
 	persist         *LabelPersist
 	window          time.Duration
 	interval        time.Duration
-	nowMs           func() int64 // injectable clock for tests
+	nowMs           func() int64  // injectable clock for tests
 	onFloorAdvanced func(float64) // called after each tick with the new floor value; may be nil
 	log             *slog.Logger
 }

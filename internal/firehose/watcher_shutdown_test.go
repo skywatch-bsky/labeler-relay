@@ -255,22 +255,31 @@ func awaitHead(t *testing.T, persist *store.LabelPersist, want int64) {
 //
 // The first case is the shape a real repository produces: the labeler service
 // record is a singleton at rkey "self", so a commit carries one labeler op.
-// The second shows that the loss does not depend on the record shape.
+// The second is the multi-op shape com.atproto.repo.applyWrites produces — a
+// labeler declaring in two collections in one commit — where an interrupted
+// later op must neither drop the earlier op nor duplicate its event on
+// replay.
 func TestShutdownMidCommitReplaysCommit(t *testing.T) {
 	cases := []struct {
-		name   string
-		rkeys  []string
-		gateAt int
+		name        string
+		collections []string
+		gateAt      int
 	}{
-		{"single-op-self-rkey", []string{"self"}, 1},
-		{"two-ops-one-commit", []string{"a", "b"}, 2},
+		{"single-op-self-rkey", []string{"app.bsky.labeler.service"}, 1},
+		{"two-collections-one-commit", []string{"app.bsky.labeler.service", "town.delve.labeler.service"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 
 			did := "did:plc:shutdownmidcommittest"
-			fh := newReplayingFirehose(t, buildLabelerCommitCAR(t, did, tc.rkeys))
+			specs := make([]declarationRecordSpec, len(tc.collections))
+			for i, coll := range tc.collections {
+				svc := sampleService("2026-01-01T00:00:00Z")
+				svc.LexiconTypeID = coll
+				specs[i] = declarationRecordSpec{Collection: coll, Rkey: "self", Record: mustMarshalCBOR(t, svc)}
+			}
+			fh := newReplayingFirehose(t, multiDeclarationCommit(t, did, 10, specs))
 
 			st, err := store.Open(t.TempDir() + "/relay.db")
 			if err != nil {
@@ -321,14 +330,14 @@ func TestShutdownMidCommitReplaysCommit(t *testing.T) {
 				head, _ := persist.Head(ctx)
 				t.Fatalf("after a shutdown with labeler op %d of %d still in flight, firehose_cursor = %q; want \"9\", the last fully processed commit. "+
 					"With 10 the restart resumes after this commit and the op is never replayed. (labeler row found=%v enabled=%v last_error=%q, head=%d, resolver calls=%d)",
-					tc.gateAt, len(tc.rkeys), got, rowFound, row.Enabled, row.LastError, head, resolver.callCount())
+					tc.gateAt, len(tc.collections), got, rowFound, row.Enabled, row.LastError, head, resolver.callCount())
 			}
 
 			// Restart over the same store with a resolver that answers at once.
 			// The firehose is asked for everything after 9, the commit replays,
-			// and every labeler op in it completes: the ops that completed
-			// before the stop are stored again, and the interrupted one joins
-			// them.
+			// and every labeler op in it completes: the ops that committed
+			// before the stop are deduplicated — exactly one event per upstream
+			// op — and the interrupted one joins them.
 			restarted := NewFirehoseWatcher(fh.URL(), registry, persist, &gatedResolver{}, st, func() {}, true,
 				slog.New(slog.NewTextHandler(io.Discard, nil)))
 			restarted.SetCursorFlushThresholds(1_000_000, time.Hour)
@@ -346,7 +355,7 @@ func TestShutdownMidCommitReplaysCommit(t *testing.T) {
 					t.Errorf("restarted Run did not return after cancellation")
 				}
 			}()
-			awaitHead(t, persist, int64(tc.gateAt-1+len(tc.rkeys)))
+			awaitHead(t, persist, int64(len(tc.collections)))
 
 			row, found, err := registry.Get(ctx, did)
 			if err != nil || !found || !row.Enabled || row.LastError != "" || row.Endpoint != "http://127.0.0.1:1"+subscribeLabelsPath {

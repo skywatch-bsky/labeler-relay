@@ -163,7 +163,7 @@ func TestServiceFrameByteFaithfulRecord(t *testing.T) {
 	// {"unknownField": "some value", "$type": "app.bsky.labeler.service",
 	//  "createdAt": "2026-06-02T00:00:00Z"}
 	record := []byte{
-		0xa3, // map(3)
+		0xa3,                                                             // map(3)
 		0x6c, 'u', 'n', 'k', 'n', 'o', 'w', 'n', 'F', 'i', 'e', 'l', 'd', // "unknownField"
 		0x6a, 's', 'o', 'm', 'e', ' ', 'v', 'a', 'l', 'u', 'e', // "some value"
 		0x65, '$', 't', 'y', 'p', 'e', // "$type"
@@ -194,15 +194,15 @@ func TestDecodeLegacyServiceFrameWithoutCollection(t *testing.T) {
 	// "record":{"a":1}} — the exact field order the old generator emitted
 	// (op, seq, src, record) and no collection key.
 	legacy := []byte{
-		0xa4,                                   // map(4)
-		0x62, 'o', 'p',                         // "op"
-		0x66, 'c', 'r', 'e', 'a', 't', 'e',     // "create"
-		0x63, 's', 'e', 'q',                    // "seq"
-		0x18, 0x2a,                             // 42
-		0x63, 's', 'r', 'c',                    // "src"
+		0xa4,           // map(4)
+		0x62, 'o', 'p', // "op"
+		0x66, 'c', 'r', 'e', 'a', 't', 'e', // "create"
+		0x63, 's', 'e', 'q', // "seq"
+		0x18, 0x2a, // 42
+		0x63, 's', 'r', 'c', // "src"
 		0x69, 'd', 'i', 'd', ':', 'p', 'l', 'c', ':', 'x', // "did:plc:x"
-		0x66, 'r', 'e', 'c', 'o', 'r', 'd',     // "record"
-		0xa1, 0x61, 'a', 0x01,                  // {"a": 1}
+		0x66, 'r', 'e', 'c', 'o', 'r', 'd', // "record"
+		0xa1, 0x61, 'a', 0x01, // {"a": 1}
 	}
 
 	decoded, err := DecodeServiceFrame(legacy)

@@ -507,7 +507,7 @@ func TestMigrateRejectsBothIdentityColumns(t *testing.T) {
 // TestMigrateBackfillsTimestamps verifies AC.4's timestamp backfill:
 // created_at is approximated from updated_at for every row; declared_at is
 // backfilled only for successfully-discovered rows (source='firehose' AND
-// endpoint != '') — a discovered row with a later error still counts, while
+// endpoint != ”) — a discovered row with a later error still counts, while
 // manual rows and RecordError-only rows stay NULL.
 func TestMigrateBackfillsTimestamps(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "timestamps.db")

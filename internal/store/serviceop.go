@@ -19,6 +19,8 @@ type ServiceOp struct {
 	Record        []byte // raw DAG-CBOR record bytes; nil for delete
 	Endpoint      string // resolved upstream endpoint; create/update only
 	AutoSubscribe bool   // whether the zero-to-one re-enable may fire
+	CommitSeq     int64  // upstream firehose commit sequence
+	Rkey          string // upstream record key
 }
 
 // ServiceOpResult reports what an applied (or skipped) op did.
@@ -61,9 +63,9 @@ type serviceOpWrites struct {
 //     and enabled. Manual rows are never auto-disabled or auto-enabled.
 //
 // On any error the whole transaction rolls back: no registry mutation, no
-// event row, no seq consumed, no declared_at change. The op is replay-safe:
-// replaying it after a failure or interruption completes both the event and
-// the registry state, with no duplicate event.
+// event row, no seq consumed, no declared_at change. Skipped also covers an
+// already-applied upstream op replay, giving exactly-once application across
+// redials and process restarts.
 func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res ServiceOpResult, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -109,6 +111,17 @@ func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res Se
 // applyServiceOpTx runs the registry transition and the #service event
 // persistence for one op inside tx.
 func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op ServiceOp, now int64) (w serviceOpWrites, err error) {
+	dedupKey := fmt.Sprintf("svc:%d/%s/%s/%s/%s", op.CommitSeq, op.DID, op.Collection, op.Rkey, op.Op)
+	var existing int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM events WHERE dedup_key = ? LIMIT 1`, dedupKey).Scan(&existing)
+	if err == nil {
+		w.skipped = true
+		return w, nil
+	}
+	if err != sql.ErrNoRows {
+		return w, fmt.Errorf("failed to check service op replay: %w", err)
+	}
+
 	switch op.Op {
 	case "create", "update":
 		if err := upsertLabelerTx(ctx, tx, Labeler{
@@ -211,19 +224,19 @@ func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op Serv
 
 	// The event: placeholder insert minting relay_seq, frame encode, update —
 	// the same steps PersistIngest applies.
-	w.seq, w.frame, err = persistServiceEventTx(ctx, tx, op)
+	w.seq, w.frame, err = persistServiceEventTx(ctx, tx, op, dedupKey)
 	return w, err
 }
 
 // persistServiceEventTx inserts the events placeholder row (minting
 // relay_seq), encodes the #service frame, and stores it.
-func persistServiceEventTx(ctx context.Context, tx *sql.Tx, op ServiceOp) (seq int64, frame []byte, err error) {
+func persistServiceEventTx(ctx context.Context, tx *sql.Tx, op ServiceOp, dedupKey string) (seq int64, frame []byte, err error) {
 	ingestTs := timestampMs()
 	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts)
-		 VALUES ('service', ?, NULL, x'', ?)
+		`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts, dedup_key)
+		 VALUES ('service', ?, NULL, x'', ?, ?)
 		 RETURNING relay_seq`,
-		op.DID, ingestTs).Scan(&seq); err != nil {
+		op.DID, ingestTs, dedupKey).Scan(&seq); err != nil {
 		return 0, nil, fmt.Errorf("failed to insert placeholder: %w", err)
 	}
 

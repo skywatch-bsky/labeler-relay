@@ -53,9 +53,9 @@ type LiveEvent struct {
 // and broadcasts to live subscribers.
 type LabelPersist struct {
 	store          *Store
-	mu             sync.Mutex     // serializes seq minting; single-writer
+	mu             sync.Mutex // serializes seq minting; single-writer
 	broadcaster    func(LiveEvent)
-	onHeadAdvanced func(float64)  // called after each successful persist with the new seq
+	onHeadAdvanced func(float64) // called after each successful persist with the new seq
 	pruneBatchSize int
 }
 

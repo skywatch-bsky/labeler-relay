@@ -526,7 +526,7 @@ func TestQuery_LexiconValues(t *testing.T) {
 
 	require.NoError(t, env.reg.RecordError(context.Background(), "did:plc:empty", "discovery failed"))
 
-	body, status := fetchLabelerList(t, env.ts.URL + "/xrpc/community.labeler.sync.getLabelers")
+	body, status := fetchLabelerList(t, env.ts.URL+"/xrpc/community.labeler.sync.getLabelers")
 	require.Equal(t, http.StatusOK, status)
 	items, ok := body["labelers"].([]any)
 	require.True(t, ok)

@@ -36,42 +36,50 @@ type LabelerDeclarationOp struct {
 	Record     []byte // raw DAG-CBOR record block bytes; nil for delete
 }
 
-// ExtractLabelerDeclarationOps scans a commit's ops for labeler service
-// declaration changes in any of the declaration collections, loading record
-// bytes from the commit CAR for create/update.
+// SkippedDeclaration reports a declaration record skipped because its CBOR is
+// malformed. Structural CAR or block lookup failures remain hard errors.
+type SkippedDeclaration struct {
+	Path string
+	Err  error
+}
+
+// ExtractLabelerDeclarationOps scans a commit's ops for self-keyed labeler
+// service declaration changes in any declaration collection, loading record
+// bytes from the commit CAR for create/update. Ops at other record keys are
+// ignored because all three schemas require the literal self key.
 //
 // Records are kept as raw block bytes (no typed unmarshal) — the relay passes
 // them through byte-faithfully. Each create/update record is validated as one
-// complete, well-formed DAG-CBOR map with no trailing bytes; lexicon-schema
-// conformance of the record's contents is intentionally NOT validated. An
-// invalid record fails extraction with an error, which the watcher logs and
-// skips.
+// complete, well-formed DAG-CBOR map with no trailing bytes; malformed records
+// are returned in skipped while valid siblings are still extracted. CAR load,
+// missing-CID, and block-fetch failures remain hard errors.
 //
-// Allocation-light: returns early when no declaration ops are present.
-func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerDeclarationOp, error) {
+// Allocation-light: returns early when no self-keyed declaration ops are present.
+func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerDeclarationOp, []SkippedDeclaration, error) {
 	if len(commit.Ops) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	hasDeclarationOps := false
 	for _, op := range commit.Ops {
 		parts := strings.SplitN(op.Path, "/", 2)
-		if len(parts) == 2 && declarationCollections[parts[0]] {
+		if len(parts) == 2 && declarationCollections[parts[0]] && parts[1] == "self" {
 			hasDeclarationOps = true
 			break
 		}
 	}
 
 	if !hasDeclarationOps {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	_, repoObj, err := repo.LoadRepoFromCAR(nil, bytes.NewReader(commit.Blocks))
 	if err != nil {
-		return nil, fmt.Errorf("failed to load repo from CAR: %w", err)
+		return nil, nil, fmt.Errorf("failed to load repo from CAR: %w", err)
 	}
 
 	var ops []LabelerDeclarationOp
+	var skipped []SkippedDeclaration
 
 	for _, op := range commit.Ops {
 		parts := strings.SplitN(op.Path, "/", 2)
@@ -82,7 +90,7 @@ func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSu
 		collection := parts[0]
 		rkey := parts[1]
 
-		if !declarationCollections[collection] {
+		if !declarationCollections[collection] || rkey != "self" {
 			continue
 		}
 
@@ -90,19 +98,20 @@ func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSu
 
 		if op.Action == "create" || op.Action == "update" {
 			if op.Cid == nil {
-				return nil, fmt.Errorf("create/update op missing CID for %s", op.Path)
+				return nil, nil, fmt.Errorf("create/update op missing CID for %s", op.Path)
 			}
 
 			// LexLink is a cid.Cid value, we need to cast it.
 			cidVal := cid.Cid(*op.Cid)
 			block, err := repoObj.RecordStore.Get(ctx, cidVal)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get block for %s: %w", op.Path, err)
+				return nil, nil, fmt.Errorf("failed to get block for %s: %w", op.Path, err)
 			}
 
 			record = block.RawData()
 			if err := dagcbor.ValidateMap(record); err != nil {
-				return nil, fmt.Errorf("invalid declaration record for %s: %w", op.Path, err)
+				skipped = append(skipped, SkippedDeclaration{Path: op.Path, Err: fmt.Errorf("invalid declaration record: %w", err)})
+				continue
 			}
 		}
 
@@ -115,5 +124,5 @@ func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSu
 		})
 	}
 
-	return ops, nil
+	return ops, skipped, nil
 }
