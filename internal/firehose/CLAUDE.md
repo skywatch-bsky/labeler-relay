@@ -10,7 +10,7 @@ Auto-discovers labelers by watching the AT Protocol firehose for `app.bsky.label
 - **Guarantees**:
   - Discovery upserts with `source="firehose"` preserve manual labeler stickiness (store's ON CONFLICT rule)
   - Newly discovered labelers are enabled per `LABELER_RELAY_AUTO_SUBSCRIBE_DISCOVERED` (constructor's autoSubscribe); with it off, discovery registers them disabled for operator opt-in. Existing rows keep their enabled state either way.
-  - Firehose cursor is batched to `meta` table every 100 commits or 5 seconds (configurable via SetCursorFlushThresholds), with a deferred flush on disconnect for crash recovery
+  - Firehose cursor is batched to `meta` table every 100 commits or 5 seconds (configurable via SetCursorFlushThresholds), with a deferred flush on disconnect for crash recovery. A commit whose processing is cut short by cancellation is never staged, so a restart replays it instead of resuming after it
   - Calls `poke()` after discovery to trigger immediate slurper reconcile
   - #service events are persisted to the output stream for downstream consumers
 - **Expects**: Valid firehose URL. Resolver can reach DID documents over the network.
