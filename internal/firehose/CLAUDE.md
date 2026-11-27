@@ -1,6 +1,6 @@
 # Firehose
 
-Last verified: 2026-06-02
+Last verified: 2026-11-27
 
 ## Purpose
 Auto-discovers labelers by watching the AT Protocol firehose for `app.bsky.labeler.service` record creates/updates. Resolves labeler endpoints from DID documents and registers them in the store.
@@ -22,12 +22,12 @@ Auto-discovers labelers by watching the AT Protocol firehose for `app.bsky.label
 
 ## Key Decisions
 - `DIDResolver` is an interface we own: decouples from indigo's concrete resolver for testability.
-- Endpoint resolution appends `/xrpc/com.atproto.label.subscribeLabels` to the DID doc's base serviceEndpoint. AT Protocol convention; labelers don't advertise the full path.
+- Endpoint resolution appends `/xrpc/com.atproto.label.subscribeLabels` to the DID doc's base serviceEndpoint. AT Protocol convention; labelers don't advertise the full path. Trailing slashes are trimmed first, so an endpoint that already contains the path is never given it twice.
 - Delete ops are intentionally ignored: the relay only enables on discovery, never auto-disables.
 
 ## Invariants
 - `ExtractLabelerServiceOps` returns early without loading CAR if no labeler ops exist (allocation-light fast path)
-- The resolved endpoint always ends with the subscribeLabels XRPC path
+- The resolved endpoint always ends with the subscribeLabels XRPC path, and contains it exactly once
 - Firehose cursor key in meta table is `"firehose_cursor"`
 
 ## Key Files

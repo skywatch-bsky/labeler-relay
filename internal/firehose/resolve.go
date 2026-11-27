@@ -65,11 +65,12 @@ func (r *indigoResolver) LabelerEndpoint(ctx context.Context, did string) (strin
 		return "", ErrNoLabelerEndpoint
 	}
 
-	// Append the subscribeLabels XRPC path if not already present.
-	// The DID doc serviceEndpoint is a base URL; callers (slurper) expect the
-	// full path so they can directly dial after scheme conversion.
+	// Append the subscribeLabels XRPC path if not already present. Trailing
+	// slashes are trimmed first, so an endpoint that already contains the
+	// path is recognized however it is written.
+	base = strings.TrimRight(base, "/")
 	if !strings.HasSuffix(base, subscribeLabelsPath) {
-		base = strings.TrimRight(base, "/") + subscribeLabelsPath
+		base += subscribeLabelsPath
 	}
 
 	return base, nil
