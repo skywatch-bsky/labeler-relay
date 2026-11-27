@@ -184,21 +184,39 @@ func (w *FirehoseWatcher) handleEvent(ctx context.Context, evt *stream.XRPCStrea
 }
 
 // handleCommit processes a commit event from the firehose.
+//
+// Every declaration op routes through the store's atomic
+// LabelPersist.ApplyServiceOp, which applies the registry transition (upsert,
+// declaration tracking, enable/disable) and the #service event in one
+// transaction.
+//
+// Error contract: an ApplyServiceOp failure — context cancellation, SQLite
+// failure, frame-encode failure, anything — breaks out of the op loop
+// immediately and handleCommit returns the error WITHOUT staging the commit,
+// so the firehose cursor stays before this commit and the redial replays it.
+// (A non-cancellation store failure would otherwise advance the cursor past a
+// rolled-back op and lose it forever; breaking at the first failure also
+// prevents later ops in the same commit from applying and then duplicating
+// events on replay.) Resolver/RecordError failures keep their separate
+// best-effort, non-fatal policy: they record the error in the registry and
+// continue, tracking no declaration and emitting no event.
 func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) error {
-	ops, err := ExtractLabelerServiceOps(ctx, commit)
+	ops, err := ExtractLabelerDeclarationOps(ctx, commit)
 	if err != nil {
 		w.log.Error("extract failed", "err", err)
 		// Record the error but don't crash.
 		return nil
 	}
 
-	// interrupted is set when cancellation cut this commit short: an op
-	// failed because the context ended, so it and every op after it were
-	// neither registered nor recorded as an error.
+	// interrupted is set when cancellation cut this commit short during
+	// endpoint resolution: the resolver call failed because the context
+	// ended, so the op and every op after it were neither registered nor
+	// recorded as an error.
 	var interrupted error
 
 	for _, op := range ops {
-		w.log.Debug("labeler op", "did", op.RepoDID, "action", op.Action, "rkey", op.Rkey)
+		w.log.Debug("labeler declaration op", "did", op.RepoDID, "action", op.Action,
+			"collection", op.Collection, "rkey", op.Rkey)
 
 		if op.Action == "create" || op.Action == "update" {
 			endpoint, err := w.resolver.LabelerEndpoint(ctx, op.RepoDID)
@@ -217,45 +235,41 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				continue
 			}
 
-			// Upsert the labeler with firehose source.
-			// The Phase-2 upsert rule preserves manual labeler entries.
-			// Enabled only matters on first insert: the ON CONFLICT rule
-			// preserves the existing enabled state, so flipping the flag
-			// never disables an already-registered labeler.
-			err = w.registry.Upsert(ctx, store.Labeler{
-				DID:       op.RepoDID,
-				Endpoint:  endpoint,
-				Source:    "firehose",
-				Enabled:   w.autoSubscribe,
-				UpdatedAt: time.Now().Unix(),
-			})
-			if err != nil {
-				w.log.Error("upsert failed", "did", op.RepoDID, "err", err)
-				if ctx.Err() != nil {
-					interrupted = ctx.Err()
-				}
-				continue
+			if _, err := w.persist.ApplyServiceOp(ctx, store.ServiceOp{
+				Op:            op.Action,
+				DID:           op.RepoDID,
+				Collection:    op.Collection,
+				Record:        op.Record,
+				Endpoint:      endpoint,
+				AutoSubscribe: w.autoSubscribe,
+			}); err != nil {
+				// The whole op rolled back; the commit is incomplete and must
+				// not count as processed.
+				w.log.Error("apply service op failed", "did", op.RepoDID, "err", err)
+				return err
 			}
-
-			_, err = w.persist.PersistIngest(ctx, store.IngestEvent{
-				Kind:       "service",
-				LabelerDID: op.RepoDID,
-				Op:         op.Action,
-				Record:     op.Record,
-			})
-			if err != nil {
-				w.log.Error("persist failed", "did", op.RepoDID, "err", err)
-				if ctx.Err() != nil {
-					interrupted = ctx.Err()
-				}
-				continue
-			}
-
+			// A registry row and/or an event changed: reconcile the slurper.
 			w.poke()
 		} else if op.Action == "delete" {
-			// Delete ops: only disable firehose-sourced labelers, never manual.
-			// (Manual stickiness is enforced at the registry level.)
-			// For now, we skip this—only enable on discovery, don't disable.
+			res, err := w.persist.ApplyServiceOp(ctx, store.ServiceOp{
+				Op:         "delete",
+				DID:        op.RepoDID,
+				Collection: op.Collection,
+				Record:     nil,
+			})
+			if err != nil {
+				w.log.Error("apply service op failed", "did", op.RepoDID, "err", err)
+				return err
+			}
+			if res.Skipped {
+				// The relay never registered this declaration (e.g. the row
+				// predates multi-collection tracking): nothing to do.
+				w.log.Debug("delete of untracked declaration", "did", op.RepoDID, "collection", op.Collection)
+			} else if res.EnabledChanged {
+				// A disable needs a slurper reconcile; the delete event alone
+				// does not.
+				w.poke()
+			}
 		}
 	}
 

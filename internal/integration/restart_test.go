@@ -8,15 +8,15 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-// TestObservedSeqSurvivesRestart exercises the close/reopen boundary:
-// observed_seq values survive a full Store close and reopen (Store.Open
+// TestIDAndCreatedAtSurviveRestart exercises the close/reopen boundary:
+// id values survive a full Store close and reopen (Store.Open
 // re-runs the idempotent migration, which must not re-mint), the reopened
 // list still arrives in observed order, and a labeler registered after
 // reopening mints a sequence above the previous maximum. Unlike
 // TestResumeSlurper, which reuses a still-open store, every database user is
 // shut down before the close here — persist and registry run no background
 // goroutines in this test, so closing the Store is the shutdown.
-func TestObservedSeqSurvivesRestart(t *testing.T) {
+func TestIDAndCreatedAtSurviveRestart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -56,10 +56,10 @@ func TestObservedSeqSurvivesRestart(t *testing.T) {
 		if l.DID != dids[i] {
 			t.Fatalf("expected list order %v, got %v", dids, didOrder(list1))
 		}
-		if l.ObservedSeq != int64(i+1) {
-			t.Fatalf("expected %s observed_seq=%d, got %d", l.DID, i+1, l.ObservedSeq)
+		if l.ID != int64(i+1) {
+			t.Fatalf("expected %s id=%d, got %d", l.DID, i+1, l.ID)
 		}
-		before[l.DID] = l.ObservedSeq
+		before[l.DID] = l.ID
 	}
 
 	// Crash-restart boundary: shut down every database user, close the store.
@@ -84,9 +84,9 @@ func TestObservedSeqSurvivesRestart(t *testing.T) {
 		t.Fatalf("expected 3 labelers after reopen, got %d", len(list2))
 	}
 	for _, l := range list2 {
-		if before[l.DID] != l.ObservedSeq {
-			t.Errorf("%s observed_seq changed across restart: before=%d after=%d",
-				l.DID, before[l.DID], l.ObservedSeq)
+		if before[l.DID] != l.ID {
+			t.Errorf("%s id changed across restart: before=%d after=%d",
+				l.DID, before[l.DID], l.ID)
 		}
 	}
 	for i, l := range list2 {
@@ -116,9 +116,9 @@ func TestObservedSeqSurvivesRestart(t *testing.T) {
 			maxBefore = v
 		}
 	}
-	if got.ObservedSeq <= maxBefore {
-		t.Errorf("post-restart observed_seq=%d must exceed the previous maximum %d",
-			got.ObservedSeq, maxBefore)
+	if got.ID <= maxBefore {
+		t.Errorf("post-restart id=%d must exceed the previous maximum %d",
+			got.ID, maxBefore)
 	}
 }
 

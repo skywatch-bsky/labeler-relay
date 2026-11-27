@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/scarndp/labeler-relay/internal/store"
@@ -24,26 +25,50 @@ const (
 )
 
 // labelerView is the public projection of a registry labeler row.
-// last_error, require_sig, and updated_at are deliberately excluded.
-// last_upstream_seq is always emitted: null for labelers that have never
-// ingested, numeric otherwise.
+// last_error, require_sig, and the internal updated_at bookkeeping timestamp
+// are deliberately excluded. last_upstream_seq is always emitted: null for
+// labelers that have never ingested, numeric otherwise. updatedAt is the
+// relay-observation timestamp (declared_at), not internal bookkeeping: it is
+// present only when a declaration was observed. declarations is always
+// present and non-null; an empty declaration set serializes as [].
 type labelerView struct {
-	DID             string `json:"did"`
-	Endpoint        string `json:"endpoint"`
-	Source          string `json:"source"`
-	Enabled         bool   `json:"enabled"`
-	LastUpstreamSeq *int64 `json:"last_upstream_seq"`
+	ID              int64    `json:"id"`
+	DID             string   `json:"did"`
+	CreatedAt       string   `json:"createdAt"`
+	UpdatedAt       *string  `json:"updatedAt,omitempty"`
+	Endpoint        string   `json:"endpoint"`
+	Enabled         bool     `json:"enabled"`
+	LastUpstreamSeq *int64   `json:"last_upstream_seq"`
+	Declarations    []string `json:"declarations"`
 }
 
-// newLabelerView projects a registry row to its public view.
-func newLabelerView(l store.Labeler) labelerView {
-	return labelerView{
+// newLabelerView projects a registry row and its declaration collections to
+// the public view. declarations must be non-nil for the []-not-null JSON
+// emission; the helper normalizes nil to an empty slice.
+func newLabelerView(l store.Labeler, declarations []string) labelerView {
+	if declarations == nil {
+		declarations = []string{}
+	}
+	v := labelerView{
+		ID:              l.ID,
 		DID:             l.DID,
+		CreatedAt:       formatDatetime(l.CreatedAt),
 		Endpoint:        l.Endpoint,
-		Source:          l.Source,
 		Enabled:         l.Enabled,
 		LastUpstreamSeq: l.LastUpstreamSeq,
+		Declarations:    declarations,
 	}
+	if l.DeclaredAt != nil {
+		updatedAt := formatDatetime(*l.DeclaredAt)
+		v.UpdatedAt = &updatedAt
+	}
+	return v
+}
+
+// formatDatetime renders unix seconds as an atproto datetime: RFC 3339, UTC,
+// whole-second precision, uppercase T and Z.
+func formatDatetime(sec int64) string {
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
 
 // xrpcErrorBody is the JSON shape XRPC requires on error responses:
@@ -62,8 +87,8 @@ func writeXRPCError(w http.ResponseWriter, status int, name, msg string) {
 }
 
 // getLabelersResponse is the JSON body returned by HandleGetLabelers.
-// Cursor (an observed_seq value) is present only when further pages exist;
-// observed_seq values start at 1, so 0 reliably means "absent" under omitempty.
+// Cursor (the last row's id) is present only when further pages exist; ids
+// start at 1, so 0 reliably means "absent" under omitempty.
 type getLabelersResponse struct {
 	Labelers []labelerView `json:"labelers"`
 	Cursor   int64         `json:"cursor,omitempty"`
@@ -72,9 +97,8 @@ type getLabelersResponse struct {
 // HandleGetLabelers serves GET /xrpc/community.labeler.sync.getLabelers.
 //
 // Params: limit (integer, default 50, rejected outside 1-100), cursor (the
-// observed_seq of the last item of the previous page; keyset pagination over
-// the observed-ordered list), enabled (literal true/false filter; absent
-// returns all).
+// id of the last item of the previous page; keyset pagination over the
+// id-ordered list), enabled (literal true/false filter; absent returns all).
 func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -125,8 +149,15 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// List returns rows in ascending observed_seq order (first-observed
-	// first); apply the enabled filter in memory to keep a single read path.
+	declarations, err := s.registry.ListDeclarations(ctx)
+	if err != nil {
+		s.log.Error("query: failed to list declarations", "err", err)
+		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
+		return
+	}
+
+	// List returns rows in ascending id order (first-observed first); apply
+	// the enabled filter in memory to keep a single read path.
 	filtered := make([]store.Labeler, 0, len(labelers))
 	for _, l := range labelers {
 		if enabledFilter == nil || l.Enabled == *enabledFilter {
@@ -134,13 +165,13 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Keyset pagination: skip rows at or before the cursor observed_seq, then
-	// take one page. A cursor past the current maximum (or past a range whose
-	// rows were later disabled by the filter) yields an empty or partial page
-	// with no cursor — a clean end-of-walk, never an error.
+	// Keyset pagination: skip rows at or before the cursor id, then take one
+	// page. A cursor past the current maximum (or past a range whose rows
+	// were later disabled by the filter) yields an empty or partial page with
+	// no cursor — a clean end-of-walk, never an error.
 	start := 0
 	if hasCursor {
-		for start < len(filtered) && filtered[start].ObservedSeq <= cursor {
+		for start < len(filtered) && filtered[start].ID <= cursor {
 			start++
 		}
 	}
@@ -151,14 +182,14 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]labelerView, 0, end-start)
 	for _, l := range filtered[start:end] {
-		views = append(views, newLabelerView(l))
+		views = append(views, newLabelerView(l, declarations[l.DID]))
 	}
 
 	resp := getLabelersResponse{Labelers: views}
 	if end < len(filtered) {
-		// labelerView does not serialize observed_seq, so the cursor value
-		// comes from the store rows, not the views.
-		resp.Cursor = filtered[end-1].ObservedSeq
+		// labelerView serializes the row's id, but the response cursor comes
+		// from the store rows, not the views.
+		resp.Cursor = filtered[end-1].ID
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -196,8 +227,15 @@ func (s *Server) HandleGetLabeler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	declarations, err := s.registry.DeclarationsFor(ctx, did.String())
+	if err != nil {
+		s.log.Error("query: failed to read declarations", "err", err)
+		writeXRPCError(w, http.StatusInternalServerError, "InternalServerError", "internal error")
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(newLabelerView(labeler)); err != nil {
+	if err := json.NewEncoder(w).Encode(newLabelerView(labeler, declarations)); err != nil {
 		s.log.Error("query: failed to encode response", "err", err)
 	}
 }

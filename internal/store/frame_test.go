@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"testing"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -114,17 +115,23 @@ func TestFrameEncodeDecodeLabels(t *testing.T) {
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, []byte(label.Sig))
 }
 
-// TestFrameEncodeDecodeService verifies service frame encode/decode.
+// TestFrameEncodeDecodeService verifies service frame encode/decode,
+// including the collection field and byte-faithful record passthrough.
 func TestFrameEncodeDecodeService(t *testing.T) {
 	seq := int64(42)
 	src := "did:plc:example"
+	op := "create"
+	collection := "town.delve.labeler.service"
+
 	rec := &bsky.LabelerService{
 		CreatedAt: "2026-06-01T00:00:00Z",
 		Policies:  &bsky.LabelerDefs_LabelerPolicies{},
 	}
+	var recBuf bytes.Buffer
+	require.NoError(t, rec.MarshalCBOR(&recBuf))
+	record := recBuf.Bytes()
 
-	op := "create"
-	encoded, err := EncodeServiceFrame(seq, src, op, rec)
+	encoded, err := EncodeServiceFrame(seq, src, op, collection, record)
 	require.NoError(t, err)
 	require.NotEmpty(t, encoded)
 
@@ -134,8 +141,103 @@ func TestFrameEncodeDecodeService(t *testing.T) {
 	require.Equal(t, seq, decoded.Seq)
 	require.Equal(t, src, decoded.Src)
 	require.Equal(t, op, decoded.Op)
+	require.Equal(t, collection, decoded.Collection)
 	require.NotNil(t, decoded.Record)
-	require.Equal(t, "2026-06-01T00:00:00Z", decoded.Record.CreatedAt)
+	require.Equal(t, record, decoded.Record.CBOR,
+		"the record must round-trip byte-for-byte")
+
+	// A nil record (delete op) omits the field entirely.
+	encodedDelete, err := EncodeServiceFrame(seq, src, "delete", collection, nil)
+	require.NoError(t, err)
+	decodedDelete, err := DecodeServiceFrame(encodedDelete)
+	require.NoError(t, err)
+	require.Equal(t, "delete", decodedDelete.Op)
+	require.Equal(t, collection, decodedDelete.Collection)
+	require.Nil(t, decodedDelete.Record, "delete frames carry no record")
+}
+
+// TestServiceFrameByteFaithfulRecord verifies AC.6 at the store level: a
+// hand-encoded record map carrying unknown fields survives encode→decode
+// byte-identically — the record is passthrough, never re-encoded.
+func TestServiceFrameByteFaithfulRecord(t *testing.T) {
+	// {"unknownField": "some value", "$type": "app.bsky.labeler.service",
+	//  "createdAt": "2026-06-02T00:00:00Z"}
+	record := []byte{
+		0xa3, // map(3)
+		0x6c, 'u', 'n', 'k', 'n', 'o', 'w', 'n', 'F', 'i', 'e', 'l', 'd', // "unknownField"
+		0x6a, 's', 'o', 'm', 'e', ' ', 'v', 'a', 'l', 'u', 'e', // "some value"
+		0x65, '$', 't', 'y', 'p', 'e', // "$type"
+		0x78, 0x18, // text(24): "app.bsky.labeler.service"
+		'a', 'p', 'p', '.', 'b', 's', 'k', 'y', '.', 'l', 'a', 'b', 'e', 'l', 'e', 'r', '.', 's', 'e', 'r', 'v', 'i', 'c', 'e',
+		0x69, 'c', 'r', 'e', 'a', 't', 'e', 'd', 'A', 't', // "createdAt"
+		0x74, '2', '0', '2', '6', '-', '0', '6', '-', '0', '2', 'T', '0', '0', ':', '0', '0', ':', '0', '0', 'Z',
+	}
+
+	encoded, err := EncodeServiceFrame(7, "did:plc:raw", "update", "so.sprk.labeler.service", record)
+	require.NoError(t, err)
+
+	decoded, err := DecodeServiceFrame(encoded)
+	require.NoError(t, err)
+	require.Equal(t, "so.sprk.labeler.service", decoded.Collection)
+	require.Equal(t, "update", decoded.Op)
+	require.NotNil(t, decoded.Record)
+	require.Equal(t, record, decoded.Record.CBOR,
+		"hand-encoded record with unknown fields must survive byte-identically")
+}
+
+// TestDecodeLegacyServiceFrameWithoutCollection verifies AC.7: a frame
+// recorded before multi-collection support (no "collection" key, record
+// emitted by the old typed encoder) still decodes, yielding an empty
+// Collection and the record bytes.
+func TestDecodeLegacyServiceFrameWithoutCollection(t *testing.T) {
+	// Hand-built legacy frame: map(4){"op":"create","seq":42,"src":"did:plc:x",
+	// "record":{"a":1}} — the exact field order the old generator emitted
+	// (op, seq, src, record) and no collection key.
+	legacy := []byte{
+		0xa4,                                   // map(4)
+		0x62, 'o', 'p',                         // "op"
+		0x66, 'c', 'r', 'e', 'a', 't', 'e',     // "create"
+		0x63, 's', 'e', 'q',                    // "seq"
+		0x18, 0x2a,                             // 42
+		0x63, 's', 'r', 'c',                    // "src"
+		0x69, 'd', 'i', 'd', ':', 'p', 'l', 'c', ':', 'x', // "did:plc:x"
+		0x66, 'r', 'e', 'c', 'o', 'r', 'd',     // "record"
+		0xa1, 0x61, 'a', 0x01,                  // {"a": 1}
+	}
+
+	decoded, err := DecodeServiceFrame(legacy)
+	require.NoError(t, err)
+	require.Equal(t, int64(42), decoded.Seq)
+	require.Equal(t, "create", decoded.Op)
+	require.Equal(t, "did:plc:x", decoded.Src)
+	require.Equal(t, "", decoded.Collection,
+		"legacy frames carry no collection; consumers default to app.bsky")
+	require.NotNil(t, decoded.Record)
+	require.Equal(t, []byte{0xa1, 0x61, 'a', 0x01}, decoded.Record.CBOR)
+}
+
+// TestRawRecordDecodesOneItemOnly verifies AC.7's load-bearing decode
+// property: in the frame map "collection" (10 bytes) sorts after "record"
+// (6 bytes), so RawRecord.UnmarshalCBOR must consume exactly one CBOR item —
+// over-reading would swallow the following collection field. A malformed
+// record value must be rejected, not over-read.
+func TestRawRecordDecodesOneItemOnly(t *testing.T) {
+	record := []byte{0xa1, 0x61, 'a', 0x01}
+	encoded, err := EncodeServiceFrame(3, "did:plc:one", "create", "app.bsky.labeler.service", record)
+	require.NoError(t, err)
+
+	decoded, err := DecodeServiceFrame(encoded)
+	require.NoError(t, err)
+	require.Equal(t, record, decoded.Record.CBOR)
+	require.Equal(t, "app.bsky.labeler.service", decoded.Collection,
+		"the record decode must not consume the following collection field")
+
+	// Malformed record value: a map claiming 2 pairs with only 1 present.
+	malformed := []byte{0xa2, 0x61, 'a', 0x01}
+	badFrame, err := EncodeServiceFrame(3, "did:plc:one", "create", "app.bsky.labeler.service", malformed)
+	require.NoError(t, err)
+	_, err = DecodeServiceFrame(badFrame)
+	require.Error(t, err, "malformed record containers must be rejected at decode")
 }
 
 // TestFrameEncodeDecodeInfo verifies info frame encode/decode.

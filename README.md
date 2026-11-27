@@ -37,7 +37,7 @@ No Bluesky account is required. The relay needs network access to the firehose, 
    ```
 
    The relay creates `labeler-relay.db` in the current folder and initializes its schema. No separate database server is required.
-   It watches the firehose for labeler service records and enables discovered labelers by default.
+   It watches the firehose for labeler service declarations in the `app.bsky.labeler.service`, `town.delve.labeler.service`, and `so.sprk.labeler.service` collections, and enables discovered labelers by default.
    Discovery observes new firehose events. It is not an initial inventory of all existing labelers.
 
 6. Open another terminal and check the relay:
@@ -87,7 +87,7 @@ Bash, Python 3, and curl are required only for the [bulk importer](#bulk-import)
 ## What it does
 
 The relay subscribes to enabled labelers through `com.atproto.label.subscribeLabels` and publishes events through `community.labeler.sync.subscribeLabelers`.
-It discovers labelers from `app.bsky.labeler.service` firehose records or accepts manual registration through the admin API.
+It discovers labelers from declaration records in the `app.bsky.labeler.service`, `town.delve.labeler.service`, and `so.sprk.labeler.service` firehose collections, or accepts manual registration through the admin API.
 
 Relayed labels retain their signatures and signed fields. Consumers can verify them against the origin labeler's `#atproto_label` signing key.
 The signature policy rejects missing signatures. It does not establish that a signature is valid.
@@ -156,13 +156,14 @@ The JSON below illustrates decoded bodies, not JSON messages sent over the socke
 `seq` is the relay sequence. `upstreamSeq` is the upstream sequence. Each item in `labels` is a `com.atproto.label.defs#label`.
 `$bytes` illustrates binary signature bytes in JSON. The sample signature is a placeholder.
 
-**`#service`** carries a service declaration observed through the firehose:
+**`#service`** carries a labeler service declaration observed through the firehose:
 
 ```json
 {
   "seq": 43,
   "src": "did:plc:example",
   "op": "create",
+  "collection": "app.bsky.labeler.service",
   "record": {
     "$type": "app.bsky.labeler.service",
     "policies": { "labelValues": ["spam"] },
@@ -171,7 +172,11 @@ The JSON below illustrates decoded bodies, not JSON messages sent over the socke
 }
 ```
 
-`op` is `create`, `update`, or `delete`. The full service record accompanies create and update events. Delete events omit `record`.
+`op` is `create`, `update`, or `delete`. `collection` names the declaration collection the record belongs to: `app.bsky.labeler.service`, `town.delve.labeler.service`, or `so.sprk.labeler.service`. Delete events carry the deleted `collection` and omit `record`.
+
+The full declaration record accompanies create and update events as the raw CBOR block from the labeler's repository, passed through byte-faithfully: its bytes are exactly the upstream block, never decoded and re-encoded, including any fields this relay does not know. Frames recorded before multi-collection support carry no `collection`; those records are `app.bsky.labeler.service`.
+
+A discovered labeler that deletes its last declaration record is considered inactive: the relay disables it and unsubscribes. A later declaration re-enables it. A labeler an operator disabled through the admin API stays disabled.
 
 **`#info`** reports an outdated cursor:
 
@@ -206,32 +211,39 @@ Example response:
 {
   "labelers": [
     {
+      "id": 1,
       "did": "did:plc:ar7c4by46qjdydhdevvrndac",
+      "createdAt": "2026-05-01T00:00:00Z",
+      "updatedAt": "2026-06-01T00:00:00Z",
       "endpoint": "bsky.app",
-      "source": "manual",
       "enabled": true,
-      "last_upstream_seq": 35916330
+      "last_upstream_seq": 35916330,
+      "declarations": ["app.bsky.labeler.service", "town.delve.labeler.service"]
     },
     {
+      "id": 2,
       "did": "did:plc:k2vjpxvpxbnfyjzkb66cg7ju",
+      "createdAt": "2026-05-02T00:00:00Z",
       "endpoint": "",
-      "source": "firehose",
       "enabled": false,
-      "last_upstream_seq": null
+      "last_upstream_seq": null,
+      "declarations": []
     }
   ],
   "cursor": 2
 }
 ```
 
-`labelers` lists registry entries oldest-observed first: the order in which the relay first observed them, not DID order. `source` is `firehose` for discovered labelers or `manual` for entries added through the admin API.
+`labelers` lists registry entries oldest-observed first: the order in which the relay first observed them, not DID order.
+`id` is the entry's monotonically increasing identifier, minted when it was first registered and never reused. `createdAt` is when the relay first observed a declaration for the DID. `updatedAt` is the date of the most recently observed declaration update; it is absent when this relay has not observed a declaration for the labeler.
 `endpoint` is the labeler's host, including its port when the DID document specifies one. It stays empty until the relay resolves the labeler's DID document. `last_upstream_seq` is the last sequence ingested from that labeler; it is `null` when the labeler has never ingested.
-`cursor` is the `observed_seq` of the last labeler on the page. Pass it back to fetch the next page; a response without `cursor` is the last page.
+`declarations` lists the declaration collections the labeler currently holds, as observed by this relay. It is empty (never null) for manually added labelers.
+`cursor` is the `id` of the last labeler on the page. Pass it back to fetch the next page; a response without `cursor` is the last page.
 
 Parameters:
 
 - `limit` (optional, default `50`): integer from 1 through 100. Out-of-range or non-integer values return HTTP 400 `InvalidRequest`. Values are rejected, not clamped.
-- `cursor` (optional): the `observed_seq` of the last labeler on the previous page. A non-negative integer; non-integer or negative values return HTTP 400 `InvalidRequest`. A cursor past the last labeler returns an empty list, so walking past the end is safe.
+- `cursor` (optional): the `id` of the last labeler on the previous page. A non-negative integer; non-integer or negative values return HTTP 400 `InvalidRequest`. A cursor past the last labeler returns an empty list, so walking past the end is safe.
 - `enabled` (optional): `true` returns only enabled labelers, `false` only disabled ones. Omit it to receive all labelers.
 
 This loop walks every page:
@@ -258,15 +270,18 @@ Example response:
 
 ```json
 {
+  "id": 1,
   "did": "did:plc:ar7c4by46qjdydhdevvrndac",
+  "createdAt": "2026-05-01T00:00:00Z",
+  "updatedAt": "2026-06-01T00:00:00Z",
   "endpoint": "bsky.app",
-  "source": "manual",
   "enabled": true,
-  "last_upstream_seq": 35916330
+  "last_upstream_seq": 35916330,
+  "declarations": ["app.bsky.labeler.service", "town.delve.labeler.service"]
 }
 ```
 
-The `did` parameter is required. A malformed or unknown DID returns HTTP 400 `InvalidRequest`.
+The `did` parameter is required. A malformed or unknown DID returns HTTP 400 `InvalidRequest`. The response carries the same fields as each `labelers` entry above, including the optional `updatedAt` and the `declarations` array.
 
 Error responses are JSON objects with `error` and `message`:
 

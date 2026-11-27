@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
-	bsky "github.com/bluesky-social/indigo/api/bsky"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,10 +41,8 @@ func TestPersistIngestSeqMonotonicity(t *testing.T) {
 			Kind:        "service",
 			LabelerDID:  "did:plc:labeler2",
 			UpstreamSeq: nil,
-			Record: &bsky.LabelerService{
-				CreatedAt: "2026-06-01T00:00:00Z",
-				Policies:  &bsky.LabelerDefs_LabelerPolicies{},
-			},
+			Collection:  "app.bsky.labeler.service",
+			Record:      []byte{0xa1, 0x61, 'a', 0x01},
 		},
 		{
 			Kind:        "labels",

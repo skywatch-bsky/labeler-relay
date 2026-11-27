@@ -19,8 +19,17 @@ CREATE TABLE IF NOT EXISTS labelers (
     require_sig      INTEGER,
     last_upstream_seq INTEGER,
     last_error       TEXT,
-    observed_seq     INTEGER, -- first-observation sequence (minted at first insert; backfilled by the migrate step in store.go)
+    id               INTEGER, -- monotonically increasing identifier, minted at first insert and never reused (renamed from observed_seq; ancient databases get it backfilled by the migrate step in store.go)
+    created_at       INTEGER NOT NULL, -- unix SECONDS: row creation, never updated (migrated rows are backfilled from updated_at by the migrate step in store.go)
+    declared_at      INTEGER, -- unix SECONDS: last observed declaration transition; NULL until one is observed; written only by ApplyServiceOp
     updated_at       INTEGER NOT NULL -- unix SECONDS (unlike events.ingest_ts, which is milliseconds)
+);
+
+CREATE TABLE IF NOT EXISTS labeler_declarations (
+    did        TEXT NOT NULL,
+    collection TEXT NOT NULL, -- declaration collection NSID, e.g. app.bsky.labeler.service
+    PRIMARY KEY (did, collection),
+    FOREIGN KEY (did) REFERENCES labelers(did)
 );
 
 CREATE TABLE IF NOT EXISTS meta (

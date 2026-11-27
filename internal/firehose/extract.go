@@ -9,39 +9,60 @@ import (
 	"strings"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
-	"github.com/bluesky-social/indigo/api/bsky"
 	"github.com/bluesky-social/indigo/atproto/repo"
 	"github.com/ipfs/go-cid"
-	cbg "github.com/whyrusleeping/cbor-gen"
+
+	"github.com/scarndp/labeler-relay/internal/dagcbor"
 )
 
-// LabelerServiceOp is a discovered create/update/delete of an app.bsky.labeler.service record.
-type LabelerServiceOp struct {
-	RepoDID string                // the labeler's DID
-	Action  string                // "create" | "update" | "delete"
-	Rkey    string                // record key (usually "self")
-	Record  *bsky.LabelerService  // nil for delete
+// declarationCollections is the set of labeler service declaration record
+// collections the watcher recognizes: a labeler is discovered by declaring a
+// record in any of these. The three schemas are structurally identical
+// (self-keyed records with createdAt and policies), differing only in the
+// namespace of their policies ref.
+var declarationCollections = map[string]bool{
+	"app.bsky.labeler.service":   true,
+	"town.delve.labeler.service": true,
+	"so.sprk.labeler.service":    true,
 }
 
-// ExtractLabelerServiceOps scans a commit's ops for app.bsky.labeler.service changes,
-// loading record bytes from the commit CAR for create/update.
+// LabelerDeclarationOp is a discovered create/update/delete of a labeler
+// service declaration record.
+type LabelerDeclarationOp struct {
+	RepoDID    string // the labeler's DID
+	Action     string // "create" | "update" | "delete"
+	Rkey       string // record key (usually "self")
+	Collection string // declaration collection NSID
+	Record     []byte // raw DAG-CBOR record block bytes; nil for delete
+}
+
+// ExtractLabelerDeclarationOps scans a commit's ops for labeler service
+// declaration changes in any of the declaration collections, loading record
+// bytes from the commit CAR for create/update.
 //
-// Allocation-light: returns early when no labeler ops are present.
-func ExtractLabelerServiceOps(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerServiceOp, error) {
+// Records are kept as raw block bytes (no typed unmarshal) — the relay passes
+// them through byte-faithfully. Each create/update record is validated as one
+// complete, well-formed DAG-CBOR map with no trailing bytes; lexicon-schema
+// conformance of the record's contents is intentionally NOT validated. An
+// invalid record fails extraction with an error, which the watcher logs and
+// skips.
+//
+// Allocation-light: returns early when no declaration ops are present.
+func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerDeclarationOp, error) {
 	if len(commit.Ops) == 0 {
 		return nil, nil
 	}
 
-	hasLabelerOps := false
+	hasDeclarationOps := false
 	for _, op := range commit.Ops {
 		parts := strings.SplitN(op.Path, "/", 2)
-		if len(parts) == 2 && parts[0] == "app.bsky.labeler.service" {
-			hasLabelerOps = true
+		if len(parts) == 2 && declarationCollections[parts[0]] {
+			hasDeclarationOps = true
 			break
 		}
 	}
 
-	if !hasLabelerOps {
+	if !hasDeclarationOps {
 		return nil, nil
 	}
 
@@ -50,7 +71,7 @@ func ExtractLabelerServiceOps(ctx context.Context, commit *comatproto.SyncSubscr
 		return nil, fmt.Errorf("failed to load repo from CAR: %w", err)
 	}
 
-	var ops []LabelerServiceOp
+	var ops []LabelerDeclarationOp
 
 	for _, op := range commit.Ops {
 		parts := strings.SplitN(op.Path, "/", 2)
@@ -61,11 +82,11 @@ func ExtractLabelerServiceOps(ctx context.Context, commit *comatproto.SyncSubscr
 		collection := parts[0]
 		rkey := parts[1]
 
-		if collection != "app.bsky.labeler.service" {
+		if !declarationCollections[collection] {
 			continue
 		}
 
-		var record *bsky.LabelerService
+		var record []byte
 
 		if op.Action == "create" || op.Action == "update" {
 			if op.Cid == nil {
@@ -79,18 +100,18 @@ func ExtractLabelerServiceOps(ctx context.Context, commit *comatproto.SyncSubscr
 				return nil, fmt.Errorf("failed to get block for %s: %w", op.Path, err)
 			}
 
-			record = &bsky.LabelerService{}
-			cr := cbg.NewCborReader(bytes.NewReader(block.RawData()))
-			if err := record.UnmarshalCBOR(cr); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal LabelerService: %w", err)
+			record = block.RawData()
+			if err := dagcbor.ValidateMap(record); err != nil {
+				return nil, fmt.Errorf("invalid declaration record for %s: %w", op.Path, err)
 			}
 		}
 
-		ops = append(ops, LabelerServiceOp{
-			RepoDID: commit.Repo,
-			Action:  op.Action,
-			Rkey:    rkey,
-			Record:  record,
+		ops = append(ops, LabelerDeclarationOp{
+			RepoDID:    commit.Repo,
+			Action:     op.Action,
+			Rkey:       rkey,
+			Collection: collection,
+			Record:     record,
 		})
 	}
 

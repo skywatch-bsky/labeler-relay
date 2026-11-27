@@ -78,7 +78,8 @@ func TestHandleCommitCancellationDuringPersistIngest(t *testing.T) {
 	seedDone := make(chan error, 1)
 	go func() {
 		_, err := persist.PersistIngest(context.Background(), store.IngestEvent{
-			Kind: "service", LabelerDID: commit.Repo, Op: "create", Record: sampleService("2026-01-01T00:00:00Z"),
+			Kind: "service", LabelerDID: commit.Repo, Op: "create",
+			Collection: "app.bsky.labeler.service", Record: []byte{0xa1, 0x61, 'a', 0x01},
 		})
 		seedDone <- err
 	}()
@@ -96,7 +97,8 @@ func TestHandleCommitCancellationDuringPersistIngest(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := NewFirehoseWatcher("", registry, persist, &gatedResolver{}, st, func() {
+	resolver := &gatedResolver{}
+	w := NewFirehoseWatcher("", registry, persist, resolver, st, func() {
 		t.Error("interrupted commit must not poke")
 	}, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.SetCursorFlushThresholds(1_000_000, time.Hour)
@@ -116,17 +118,15 @@ func TestHandleCommitCancellationDuringPersistIngest(t *testing.T) {
 			}
 		}
 	}()
+	// Wait until the watcher has resolved the endpoint: it is then blocked
+	// (or about to block) on ApplyServiceOp's persist mutex, which the seed
+	// write holds. The registry upsert now happens inside that same
+	// transaction, so the row cannot appear until the seed releases the
+	// mutex — the resolver call is the observable progress marker.
 	deadline := time.Now().Add(10 * time.Second)
-	for {
-		_, found, err := registry.Get(context.Background(), commit.Repo)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if found {
-			break
-		}
+	for resolver.callCount() < 1 {
 		if time.Now().After(deadline) {
-			t.Fatal("watcher did not finish registry upsert")
+			t.Fatal("watcher did not reach the declaration op's store write")
 		}
 		time.Sleep(time.Millisecond)
 	}

@@ -6,7 +6,6 @@ import (
 	"bytes"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
-	bsky "github.com/bluesky-social/indigo/api/bsky"
 	"github.com/scarndp/labeler-relay/api/community"
 )
 
@@ -38,12 +37,21 @@ func DecodeLabelsFrame(data []byte) (*community.LabelerSyncSubscribeLabelers_Lab
 }
 
 // EncodeServiceFrame builds a #service output body and returns its CBOR bytes.
-func EncodeServiceFrame(seq int64, src string, op string, rec *bsky.LabelerService) ([]byte, error) {
+// The record bytes are embedded verbatim (byte-faithful passthrough of the
+// upstream CAR block); a nil record omits the field (delete ops). An empty
+// collection omits that field, matching frames recorded before
+// multi-collection support.
+func EncodeServiceFrame(seq int64, src, op, collection string, record []byte) ([]byte, error) {
+	var rec *community.RawRecord
+	if record != nil {
+		rec = &community.RawRecord{CBOR: record}
+	}
 	frame := &community.LabelerSyncSubscribeLabelers_Service{
-		Seq:    seq,
-		Src:    src,
-		Op:     op,
-		Record: rec,
+		Seq:        seq,
+		Src:        src,
+		Op:         op,
+		Collection: collection,
+		Record:     rec,
 	}
 
 	var buf bytes.Buffer

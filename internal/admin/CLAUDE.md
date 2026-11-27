@@ -9,6 +9,7 @@ Provides authenticated HTTP endpoints for manual labeler registry management. Al
 - **Exposes**: `API` (Routes), `RequireBearer` middleware
 - **Guarantees**:
   - Labeler responses return the stored `endpoint` unchanged: only the host and optional port, or empty before resolution. They do not build a display URL.
+  - Labeler JSON (add, patch, list) encodes store.Labeler directly: it exposes the additive `CreatedAt` and `DeclaredAt` keys (`DeclaredAt` is JSON null until the relay observes a declaration) but never the row's `ID` (its `json:"-"` tag). The public id/createdAt/updatedAt/declarations projection lives in the server package's labelerView, not here.
   - All routes require Bearer token auth (constant-time comparison)
   - POST /admin/labelers resolves endpoint from DID before upserting with source="manual"; the manual upsert claims source/enabled even if the row was previously inserted disabled by discovery, and the 201 body echoes the persisted row
   - Enable/disable/delete trigger slurper reconcile via poke callback
