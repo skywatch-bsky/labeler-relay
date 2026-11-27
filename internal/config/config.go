@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -140,6 +141,19 @@ func validate(cfg Config) error {
 	u, err := url.Parse(cfg.FirehoseURL)
 	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Hostname() == "" || u.User != nil {
 		return fmt.Errorf("firehose_url must be a ws:// or wss:// URL with a hostname and no userinfo")
+	}
+	authority := u.Host
+	if u.Port() == "" && !strings.HasSuffix(authority, ":") {
+		authority += ":80"
+	}
+	if _, _, err := net.SplitHostPort(authority); err != nil {
+		return fmt.Errorf("firehose_url must have a valid hostname or bracketed IPv6 address and optional port")
+	}
+	if strings.HasPrefix(u.Host, "[") {
+		addr, err := netip.ParseAddr(u.Hostname())
+		if err != nil || !addr.Is6() {
+			return fmt.Errorf("firehose_url bracketed hostname must be an IPv6 address")
+		}
 	}
 	if strings.HasSuffix(u.Host, ":") {
 		return fmt.Errorf("firehose_url port must be an integer between 1 and 65535")

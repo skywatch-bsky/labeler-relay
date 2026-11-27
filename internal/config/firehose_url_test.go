@@ -28,6 +28,14 @@ func TestLoad_RejectsUndialableFirehoseURL(t *testing.T) {
 		"ws://relay.example:0" + path,
 		"wss://relay.example:65536" + path,
 		"ws://[::1]:65536" + path,
+		"ws://relay.example:80:90" + path,
+		"ws://::1" + path,
+		"ws://::1:8080" + path,
+		"wss://[::1]:80:90" + path,
+		"ws://relay.example]:80" + path,
+		"ws://[relay.example]:80" + path,
+		"ws://[127.0.0.1]:80" + path,
+		"ws://[:::1]:80" + path,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			clearEnv(t)
@@ -52,6 +60,10 @@ func TestLoad_AcceptsWebSocketFirehoseURL(t *testing.T) {
 		"wss://relay.example:65535" + path,
 		"ws://[::1]" + path,
 		"wss://[::1]:443" + path,
+		"ws://[2001:db8::1]" + path,
+		"wss://[::ffff:192.0.2.1]:443" + path,
+		"ws://[fe80::1%25eth0]" + path,
+		"wss://[fe80::1%25eth0]:443" + path,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			clearEnv(t)
