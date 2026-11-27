@@ -1,8 +1,4 @@
 // pattern: Imperative Shell
-// Documentation drift guard for the getLabelers query contract: observed
-// order, the integer id cursor, the labelerView field set, and the null
-// last_upstream_seq emission must be documented in the README and both
-// package CLAUDE.md files.
 
 package main
 
@@ -13,10 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDocs_QueryContractDocumented verifies AC.7: the README example shows a
-// numeric cursor and its prose/params describe observed-order + null
-// semantics + the new labelerView fields; the server and store CLAUDE.md
-// files state the new contracts.
+// Keep user documentation and package contracts consistent with the query API.
 func TestDocs_QueryContractDocumented(t *testing.T) {
 	readme, err := os.ReadFile("../../README.md")
 	require.NoError(t, err)
@@ -37,7 +30,6 @@ func TestDocs_QueryContractDocumented(t *testing.T) {
 		"README must document the id cursor semantics")
 	require.Contains(t, text, "non-negative integer")
 
-	// The new labelerView fields and the removed source.
 	require.Contains(t, text, "`declarations` lists the declaration collections",
 		"README must document the declarations array")
 	require.Contains(t, text, "`id` is the entry's monotonically increasing identifier",
@@ -47,7 +39,6 @@ func TestDocs_QueryContractDocumented(t *testing.T) {
 	require.NotContains(t, text, "`source` is `firehose` for discovered labelers",
 		"README must not document the removed source field as a labelerView field")
 
-	// The declaration collections and the byte-faithful record.
 	require.Contains(t, text, "`town.delve.labeler.service`, or `so.sprk.labeler.service`",
 		"README must document all three declaration collections")
 	require.Contains(t, text, "passed through byte-faithfully",

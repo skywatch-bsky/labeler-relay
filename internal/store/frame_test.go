@@ -115,8 +115,6 @@ func TestFrameEncodeDecodeLabels(t *testing.T) {
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, []byte(label.Sig))
 }
 
-// TestFrameEncodeDecodeService verifies service frame encode/decode,
-// including the collection field and byte-faithful record passthrough.
 func TestFrameEncodeDecodeService(t *testing.T) {
 	seq := int64(42)
 	src := "did:plc:example"
@@ -146,7 +144,6 @@ func TestFrameEncodeDecodeService(t *testing.T) {
 	require.Equal(t, record, decoded.Record.CBOR,
 		"the record must round-trip byte-for-byte")
 
-	// A nil record (delete op) omits the field entirely.
 	encodedDelete, err := EncodeServiceFrame(seq, src, "delete", collection, nil)
 	require.NoError(t, err)
 	decodedDelete, err := DecodeServiceFrame(encodedDelete)
@@ -156,9 +153,7 @@ func TestFrameEncodeDecodeService(t *testing.T) {
 	require.Nil(t, decodedDelete.Record, "delete frames carry no record")
 }
 
-// TestServiceFrameByteFaithfulRecord verifies AC.6 at the store level: a
-// hand-encoded record map carrying unknown fields survives encode→decode
-// byte-identically — the record is passthrough, never re-encoded.
+// A typed record decoder would discard unknown fields. Preserve the original bytes instead.
 func TestServiceFrameByteFaithfulRecord(t *testing.T) {
 	// {"unknownField": "some value", "$type": "app.bsky.labeler.service",
 	//  "createdAt": "2026-06-02T00:00:00Z"}
@@ -185,10 +180,6 @@ func TestServiceFrameByteFaithfulRecord(t *testing.T) {
 		"hand-encoded record with unknown fields must survive byte-identically")
 }
 
-// TestDecodeLegacyServiceFrameWithoutCollection verifies AC.7: a frame
-// recorded before multi-collection support (no "collection" key, record
-// emitted by the old typed encoder) still decodes, yielding an empty
-// Collection and the record bytes.
 func TestDecodeLegacyServiceFrameWithoutCollection(t *testing.T) {
 	// Hand-built legacy frame: map(4){"op":"create","seq":42,"src":"did:plc:x",
 	// "record":{"a":1}} — the exact field order the old generator emitted
@@ -216,11 +207,8 @@ func TestDecodeLegacyServiceFrameWithoutCollection(t *testing.T) {
 	require.Equal(t, []byte{0xa1, 0x61, 'a', 0x01}, decoded.Record.CBOR)
 }
 
-// TestRawRecordDecodesOneItemOnly verifies AC.7's load-bearing decode
-// property: in the frame map "collection" (10 bytes) sorts after "record"
-// (6 bytes), so RawRecord.UnmarshalCBOR must consume exactly one CBOR item —
-// over-reading would swallow the following collection field. A malformed
-// record value must be rejected, not over-read.
+// The collection key sorts after record in the CBOR map.
+// A record decoder that consumes more than one item would swallow collection.
 func TestRawRecordDecodesOneItemOnly(t *testing.T) {
 	record := []byte{0xa1, 0x61, 'a', 0x01}
 	encoded, err := EncodeServiceFrame(3, "did:plc:one", "create", "app.bsky.labeler.service", record)

@@ -6,14 +6,8 @@ import (
 	"testing"
 )
 
-// TestListWithDeclarationsSingleSnapshot pins the single-snapshot contract
-// of the combined reads: a write that disables a labeler and removes its
-// declaration, COMMITTED between the labeler query and the declaration query
-// (via the testBetweenSnapshotReads seam, from a separate connection), must
-// not leak into the result — both halves of one call come from one read
-// snapshot. Two independent queries would observe the interleaved write
-// between them and return a torn view (an enabled labeler with no
-// declarations), which is exactly what this test rejects.
+// Independent queries could return an enabled labeler after a concurrent write removes its declaration.
+// Both combined read methods must use one snapshot.
 func TestListWithDeclarationsSingleSnapshot(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "snapshot.db"))
@@ -33,10 +27,7 @@ func TestListWithDeclarationsSingleSnapshot(t *testing.T) {
 		t.Fatalf("seed declaration op: %v", err)
 	}
 
-	// The seam fires between the two queries of each snapshot read: commit
-	// a write from a separate connection that flips the labeler to disabled
-	// and removes its declaration. A separate-reads implementation would
-	// pick the write up between its queries and tear the view.
+	// Commit on a separate connection between the two read queries to expose inconsistent snapshots.
 	testBetweenSnapshotReads = func() {
 		wtx, err := s.DB().BeginTx(ctx, nil)
 		if err != nil {
@@ -66,12 +57,7 @@ func TestListWithDeclarationsSingleSnapshot(t *testing.T) {
 		t.Fatalf("snapshot read: declarations=%v, want the pre-write declaration — the interleaved write must not tear the snapshot", got)
 	}
 
-	// GetWithDeclarations gets its own interleaving: restore the pre-write
-	// state, then let the seam commit the same flip while Get's two queries
-	// straddle it. The read snapshot was taken at Get's first query, so both
-	// halves must show the pre-write state — a separate-reads
-	// implementation would return the labeler enabled while its second
-	// query already observed the write (torn).
+	// Restore the fixture so GetWithDeclarations must also resist the concurrent write.
 	if _, err := s.DB().ExecContext(ctx, `UPDATE labelers SET enabled = 1 WHERE did = ?`, did); err != nil {
 		t.Fatalf("reseed enable: %v", err)
 	}
@@ -86,8 +72,6 @@ func TestListWithDeclarationsSingleSnapshot(t *testing.T) {
 		t.Fatalf("snapshot Get: row=%+v decs=%v, want the pre-write enabled row and declaration — the interleaved write must not tear the snapshot", row, decs)
 	}
 
-	// With the seam removed, the next read observes the committed write as
-	// a whole.
 	testBetweenSnapshotReads = nil
 	row, decs, _, err = reg.GetWithDeclarations(ctx, did)
 	if err != nil {

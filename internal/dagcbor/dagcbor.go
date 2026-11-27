@@ -3,51 +3,24 @@
 // Package dagcbor provides checked, bounded, one-item DAG-CBOR scanning for
 // record bytes the relay passes through verbatim.
 //
-// Two APIs, because a byte slice knows its remaining length and a stream does
-// not:
+// ValidateMap checks container counts against the remaining slice bytes.
+// ScanOne uses per-item iteration because streams do not expose their remaining
+// length. Each item consumes real bytes, so huge counts reach EOF or the byte
+// budget instead of overflowing a remaining-value counter. Both cap nesting.
 //
-//   - ValidateMap validates a complete byte slice as exactly one well-formed
-//     DAG-CBOR map. Container counts are checked against the remaining slice
-//     bytes before descending (every array element is at least 1 byte, every
-//     map pair at least 2), so a header claiming a huge container is rejected
-//     immediately, with no allocation and no counter that can overflow.
+// Both enforce the DAG-CBOR data model:
+// https://ipld.io/specs/codecs/dag-cbor/spec/
+// Lengths must be definite, text must be UTF-8, and map keys must be unique text
+// strings. Simple values are limited to false, true, null, and finite float64.
+// Only tag 42 is accepted. Its payload must be a non-empty byte string with
+// the 0x00 identity multibase prefix followed by a syntactically valid CID.
 //
-//   - ScanOne (scan.go) reads exactly one CBOR item from an io.Reader, copying
-//     every consumed byte to an optional io.Writer. Overflow safety comes from
-//     per-item iteration rather than a remaining-length pre-check: a
-//     definite-length container is consumed item by item, each header read
-//     consuming real bytes, so a huge claimed length simply hits EOF
-//     mid-container. No allocation ever derives from a claimed length. A
-//     recursion depth cap and an explicit consumed-bytes budget bound
-//     pathological input.
+// Map key ordering and minimal integer/length encodings are not enforced:
+// record bytes pass through verbatim and are never re-encoded.
 //
-// Both enforce the same well-formedness policy (the DAG-CBOR data-model
-// contract, per https://ipld.io/specs/codecs/dag-cbor/spec/):
-//
-//   - definite lengths only; indefinite-length items (additional info 31) are
-//     rejected, as are the reserved additional infos 28-30
-//   - major types 0, 1, 2, 3, 4, and 5 are accepted; text strings (major type
-//     3) must be valid UTF-8
-//   - major type 7 accepts exactly false (0xf4), true (0xf5), null (0xf6),
-//     and finite float64 (0xfb); every other simple value (including
-//     undefined 0xf7 and unallocated codes) and float16/float32 are rejected,
-//     as are non-finite floats
-//   - map keys must be text strings, and duplicate keys within one map are
-//     rejected
-//   - tags are rejected except tag 42, whose payload must be a non-empty byte
-//     string carrying the 0x00 identity multibase prefix followed by a
-//     syntactically valid CID (parsed with github.com/ipfs/go-cid)
-//
-// Deliberate relaxation, documented for future readers: this is a
-// well-formedness/data-model validator in the historical-decoder posture, not
-// a canonical-encoding validator. Map key ordering and minimal
-// integer/length encodings are NOT enforced, because the bytes are passed
-// through verbatim and never re-encoded.
-//
-// cbor-gen's ScanForLinks is deliberately NOT used for this: its
-// remaining-value counter does `remaining += extra * 2` in uint64 without an
-// overflow check, so a map header claiming ~2^63 pairs wraps the counter to
-// zero and the scan "succeeds" on truncated input.
+// cbor-gen's ScanForLinks uses uint64 `remaining += extra * 2` without an
+// overflow check. A map claiming ~2^63 pairs wraps it to zero, accepting
+// truncated input.
 package dagcbor
 
 import (
@@ -63,12 +36,9 @@ import (
 // maxDepth bounds CBOR recursion depth (nesting of arrays and maps).
 const maxDepth = 64
 
-// MaxScanBytes is the consumed-bytes budget ScanOne enforces as
-// belt-and-braces against pathological input. Real declaration records are
-// ~1 KB.
+// MaxScanBytes limits the total bytes ScanOne consumes for one item.
 const MaxScanBytes = 1 << 20 // 1 MiB
 
-// errTruncated reports input that ends before the item it describes.
 var errTruncated = errors.New("dagcbor: truncated input")
 
 // Major types, per RFC 8949.
@@ -127,7 +97,6 @@ func argLen(ai byte) (n int, immediate bool, err error) {
 	}
 }
 
-// decodeArg decodes big-endian argument bytes into the argument value.
 func decodeArg(b []byte) uint64 {
 	var extra uint64
 	for _, x := range b {

@@ -43,34 +43,17 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// idxLabelersID is the unique index backing the pagination cursor. It lives in
-// migrate rather than schema.sql because on an old-shape database it would
-// fail before the column exists: schema.sql runs unconditionally on every
-// open, while migrate guarantees the column first (fresh databases get it
-// from schema.sql, old ones from the identity migration below).
+// Create idxLabelersID in migrate, not schema.sql: older databases lack id until the identity migration completes.
 const idxLabelersID = `CREATE UNIQUE INDEX IF NOT EXISTS idx_labelers_id ON labelers(id)`
 
-// migrate normalizes the labelers identity column, timestamps, declarations,
-// and stored endpoints. Each mutation step is its own transaction and is
-// idempotent, so a crash between steps leaves a database that the next Open
-// completes.
+// migrate applies idempotent schema and data migrations. Each transactional step rolls back on failure, and Open retries incomplete steps.
 //
-// The identity step is a state machine over the three historical schema
-// shapes, and it is the recovery contract for the id column:
-//
-//   - ancient (neither observed_seq nor id): id is added and backfilled in
-//     rowid order, minting 1..N;
-//   - pre-change (observed_seq only): observed_seq is renamed to id,
-//     preserving every stored value;
-//   - fresh or already-migrated (id only): no identity mutation;
-//   - both columns present: Open fails — an undefined state that no released
-//     migration can produce.
-//
-// The database is either fully migrated or untouched for each step. A crash
-// (or a mid-backfill failure) rolls the whole step back, so no mixed state is
-// reachable and the next Open simply reruns it.
+// The identity migration handles four states:
+//   - Neither observed_seq nor id: add id and backfill 1..N in rowid order.
+//   - observed_seq only: rename to id without changing values.
+//   - id only: leave identity unchanged.
+//   - Both columns: fail Open because the identity source is ambiguous.
 func migrate(db *sql.DB) error {
-	// Which identity/timestamp columns does labelers carry?
 	var hasObservedSeq, hasID, hasCreatedAt, hasDeclaredAt bool
 	rows, err := db.Query("PRAGMA table_info(labelers)")
 	if err != nil {
@@ -106,10 +89,7 @@ func migrate(db *sql.DB) error {
 	case hasObservedSeq && hasID:
 		return fmt.Errorf("labelers table has both observed_seq and id columns; refusing to migrate an ambiguous schema")
 	case hasObservedSeq && !hasID:
-		// Pre-change database: rename in place, preserving every value.
-		// SQLite >= 3.25 updates index expressions that reference the renamed
-		// column, so the legacy index is dropped and replaced inside the same
-		// transaction to avoid a duplicate unique index on id.
+		// SQLite >= 3.25 updates indexes on rename. Replace the legacy index in the same transaction to avoid duplicate indexes.
 		if err := execInTx(db, "identity rename", []string{
 			`ALTER TABLE labelers RENAME COLUMN observed_seq TO id`,
 			`DROP INDEX IF EXISTS idx_labelers_observed_seq`,
@@ -134,11 +114,7 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
-	// id only: fresh (schema.sql) or already migrated — no identity mutation.
-
-	// Add replay deduplication identity to events on existing databases, then
-	// always ensure its unique index exists. NULL keys remain allowed for
-	// labels-path events and do not conflict in SQLite.
+	// NULL dedup keys permit labels-path events without upstream-op identities.
 	if err := migrateEventDedup(db); err != nil {
 		return err
 	}
@@ -150,9 +126,7 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
-	// Unconditional belt-and-braces: fresh databases reach this without any
-	// identity mutation above, so the index must be created here for them
-	// too, and any surviving legacy index must go.
+	// Fresh databases skip the identity migration but still need the unique index.
 	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_labelers_observed_seq`); err != nil {
 		return fmt.Errorf("failed to drop legacy idx_labelers_observed_seq: %w", err)
 	}
@@ -160,27 +134,12 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("failed to ensure idx_labelers_id: %w", err)
 	}
 
-	// Timestamps: add created_at/declared_at to databases that predate them
-	// (one transaction for all missing columns, then backfill).
-	//
-	// Backfill policy: created_at is approximated from updated_at for every
-	// row (row-creation time was not tracked before this change). declared_at
-	// — the public updatedAt — is approximated only for successfully
-	// discovered rows: source='firehose' AND endpoint != ''. source alone is
-	// not evidence of a registered declaration, because historical
-	// RecordError inserts create source='firehose' rows with an empty
-	// endpoint and no declaration ever observed. A non-empty stored endpoint
-	// is the evidence of a declaration-driven resolution (endpoint is never
-	// cleared once discovered, so a later error on a discovered row does not
-	// exclude it — deliberately not last_error IS NULL). Manual rows and
-	// RecordError-only rows stay NULL, so a RecordError-only row's first
-	// successful declaration is still a zero-to-one transition that can
-	// re-enable it.
-	//
-	// Note: SQLite cannot add a NOT NULL column without a default, so the
-	// added created_at column lacks the NOT NULL flag on migrated databases
-	// (schema.sql keeps it for fresh ones). The backfill leaves no NULLs and
-	// every write path sets the column, so the invariant holds everywhere.
+	// Add missing timestamps and backfill them in one transaction.
+	// Approximate created_at from updated_at because older rows have no creation timestamp.
+	// Backfill declared_at only where source='firehose' AND endpoint != ''.
+	// A resolved endpoint proves discovery even after a later error. Do not use last_error IS NULL.
+	// Manual and RecordError-only rows stay undeclared, preserving their first-declaration re-enable transition.
+	// SQLite cannot add NOT NULL without a default. The created_at backfill and all writers prevent NULL values.
 	if !hasCreatedAt || !hasDeclaredAt {
 		stmts := []string{}
 		if !hasCreatedAt {
@@ -198,11 +157,8 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
-	// Declarations backfill, meta-gated to run exactly once: an unconditional
-	// backfill would re-insert declarations after a labeler deletes them, on
-	// every reopen. The predicate matches the declared_at backfill above
-	// (successfully discovered rows), so RecordError-only rows are not marked
-	// declared and keep their zero-to-one re-enable path.
+	// Run once so reopen cannot restore a deleted declaration.
+	// Use the declared_at predicate to keep RecordError-only rows undeclared.
 	_, found, err := rawGetMeta(db, "declarations_backfilled")
 	if err != nil {
 		return fmt.Errorf("failed to read declarations_backfilled meta: %w", err)
@@ -255,10 +211,8 @@ func migrateEventDedup(db *sql.DB) error {
 	return execInTx(db, "event dedup", stmts)
 }
 
-// execInTx runs the given statements inside one transaction (BeginTx, not
-// standalone BEGIN/COMMIT Execs, because db is a pooled *sql.DB and separate
-// Execs could land on different connections). On any failure the whole step
-// rolls back.
+// execInTx rolls back the whole migration step on failure.
+// BeginTx keeps all statements on one connection. Separate db.Exec calls can use different pooled connections.
 func execInTx(db *sql.DB, step string, stmts []string) error {
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -276,7 +230,6 @@ func execInTx(db *sql.DB, step string, stmts []string) error {
 	return nil
 }
 
-// rawGetMeta reads a meta key before the Store type exists (used by migrate).
 func rawGetMeta(db *sql.DB, key string) (string, bool, error) {
 	var value string
 	err := db.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&value)

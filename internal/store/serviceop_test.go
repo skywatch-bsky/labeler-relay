@@ -1,7 +1,4 @@
 // pattern: Imperative Shell
-// Tests for LabelPersist.ApplyServiceOp: the declaration registry transition
-// and the #service event commit atomically — an injected store failure rolls
-// both back, and the replayed op completes with no duplicate state.
 
 package store_test
 
@@ -15,10 +12,7 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-// blockEventsInstall installs (or removes, when block is false) a trigger
-// that aborts every INSERT into events, failing an ApplyServiceOp at the
-// event-write step — after the registry transition has already run inside
-// the same transaction.
+// Fail the event insert after the registry transition to test rollback across both writes.
 func blockEventsInstall(t *testing.T, s *store.Store, block bool) {
 	t.Helper()
 	stmt := `DROP TRIGGER IF EXISTS block_events`
@@ -32,10 +26,7 @@ func blockEventsInstall(t *testing.T, s *store.Store, block bool) {
 	require.NoError(t, err)
 }
 
-// TestApplyServiceOpAtomicRollback verifies AC.12(a): an injected store-level
-// failure leaves no registry mutation, no declaration row, no event row, no
-// consumed relay_seq, and no declared_at change; the replayed op then
-// completes. Both the create and the delete transition paths are exercised.
+// An event-write failure must roll back the registry transition and sequence allocation, allowing a complete retry.
 func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "atomic.db"))
@@ -48,8 +39,6 @@ func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	const collection = "app.bsky.labeler.service"
 	record := []byte{0xa1, 0x61, 'a', 0x01}
 
-	// --- Create-path failure: the upsert, declaration, and declared_at all
-	// roll back with the failed event write. ---
 	blockEventsInstall(t, s, true)
 	_, err = persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op: "create", DID: did, Collection: collection,
@@ -69,8 +58,6 @@ func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, head, "a rolled-back op must consume no relay seq")
 
-	// --- Replay completes: one event, row registered and enabled, the
-	// declaration tracked, declared_at set. ---
 	blockEventsInstall(t, s, false)
 	res, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op: "create", DID: did, Collection: collection,
@@ -92,8 +79,6 @@ func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{collection}, decs)
 
-	// --- Delete-path failure: the declaration removal, the disable, and the
-	// declared_at advance all roll back with the failed event write. ---
 	blockEventsInstall(t, s, true)
 	_, err = persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op: "delete", DID: did, Collection: collection,
@@ -115,7 +100,6 @@ func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), head, "the failed delete must consume no relay seq")
 
-	// --- Replay the delete: exactly one delete event, disabled, undeclared. ---
 	blockEventsInstall(t, s, false)
 	res, err = persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op: "delete", DID: did, Collection: collection,
@@ -138,8 +122,6 @@ func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), head, "exactly one event per applied op: one create, one delete")
 
-	// A replayed delete of the now-untracked declaration is a skip: no
-	// event, no state change.
 	res, err = persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op: "delete", DID: did, Collection: collection,
 	})
@@ -150,11 +132,7 @@ func TestApplyServiceOpAtomicRollback(t *testing.T) {
 	require.Equal(t, int64(2), head, "a skipped op writes no event")
 }
 
-// TestApplyServiceOpDedupsReplay verifies the exactly-once contract across
-// replays: an op whose event already exists (same upstream commit seq, DID,
-// collection, rkey, and action) is skipped with no writes at all — no second
-// event, no relay seq, not even a declared_at advance — while a different
-// upstream op still applies.
+// Replayed upstream operations must not allocate another sequence or advance declared_at.
 func TestApplyServiceOpDedupsReplay(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "dedup.db"))
@@ -184,7 +162,6 @@ func TestApplyServiceOpDedupsReplay(t *testing.T) {
 	require.NotNil(t, row.DeclaredAt)
 	declaredBefore := *row.DeclaredAt
 
-	// The identical upstream op replayed: skipped, nothing written.
 	res, err = persist.ApplyServiceOp(ctx, op)
 	require.NoError(t, err)
 	require.True(t, res.Skipped, "a replayed upstream op must be deduplicated")
@@ -217,9 +194,7 @@ func TestApplyServiceOpDedupsReplay(t *testing.T) {
 	require.Equal(t, int64(2), res.Seq)
 }
 
-// TestApplyServiceOpRejectsEmptyRecord verifies the entry validation: a
-// create/update op without record bytes fails with a clear error before any
-// write, instead of an opaque frame-marshal failure mid-transaction.
+// Reject missing record bytes before a frame-marshal failure can obscure the input error.
 func TestApplyServiceOpRejectsEmptyRecord(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "empty.db"))
@@ -238,10 +213,7 @@ func TestApplyServiceOpRejectsEmptyRecord(t *testing.T) {
 	require.Zero(t, head)
 }
 
-// TestApplyServiceOpRecordsSkippedDeleteIdentity verifies that an untracked
-// delete commits its replay identity even though nothing else is written:
-// replaying the same upstream delete is a dedup skip, so a stale replay can
-// never apply it against state that changed in between.
+// Remember skipped deletes so a stale replay cannot delete a declaration created afterward.
 func TestApplyServiceOpRecordsSkippedDeleteIdentity(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "skipid.db"))
@@ -255,7 +227,6 @@ func TestApplyServiceOpRecordsSkippedDeleteIdentity(t *testing.T) {
 		Op: "delete", DID: did, Collection: "app.bsky.labeler.service", Rkey: "self", CommitSeq: 11,
 	}
 
-	// An untracked delete: skipped, but its identity must be recorded.
 	res, err := persist.ApplyServiceOp(ctx, deleteOp)
 	require.NoError(t, err)
 	require.True(t, res.Skipped)
@@ -265,8 +236,6 @@ func TestApplyServiceOpRecordsSkippedDeleteIdentity(t *testing.T) {
 	require.NoError(t, s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM applied_service_ops`).Scan(&ids))
 	require.Equal(t, 1, ids, "the skipped delete must record its replay identity")
 
-	// Replaying the same upstream delete: dedup skip, still no event and no
-	// labeler row.
 	res, err = persist.ApplyServiceOp(ctx, deleteOp)
 	require.NoError(t, err)
 	require.True(t, res.Skipped)
@@ -279,10 +248,6 @@ func TestApplyServiceOpRecordsSkippedDeleteIdentity(t *testing.T) {
 	require.False(t, found, "an untracked delete must never register a labeler")
 }
 
-// TestApplyServiceOpCommitSeqZeroDisablesDedup verifies the zero-value
-// semantics: an op with CommitSeq 0 skips the identity gate, so repeated
-// direct calls apply repeatedly (the watcher always passes a real commit
-// sequence).
 func TestApplyServiceOpCommitSeqZeroDisablesDedup(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "zeroseq.db"))

@@ -19,18 +19,9 @@ import (
 	"github.com/multiformats/go-multihash"
 )
 
-// buildDeclarationCAR builds a REAL atproto repo CAR containing one labeler
-// service declaration record at "<collection>/<rkey>", plus a signed commit
-// and the MST nodes that reference it — exactly the structure
-// repo.LoadRepoFromCAR expects. It returns the CAR bytes (suitable for a
-// firehose commit's Blocks field) and the real content CID of the record
-// (suitable for the op's Cid). This is the genuine fixture the
-// extract/watcher tests decode through indigo's real CAR-loading path.
-//
-// The record block is built from a *bsky.LabelerService marshaled to CBOR
-// regardless of collection: the three declaration schemas are structurally
-// identical, and extraction no longer decodes records, so one builder serves
-// all three.
+// buildDeclarationCAR includes the signed commit and MST needed by LoadRepoFromCAR.
+// bsky.LabelerService supplies fixtures for all three collections because their
+// schemas share a structure and extraction does not perform typed decoding.
 func buildDeclarationCAR(t *testing.T, did, collection, rkey string, svc *bsky.LabelerService) ([]byte, cid.Cid) {
 	t.Helper()
 	var recBuf bytes.Buffer
@@ -128,20 +119,15 @@ func buildDeclarationCARFromBytes(t *testing.T, did, collection, rkey string, re
 	return out.Bytes(), recordCID
 }
 
-// declarationRecordSpec is one declaration record in a multi-record CAR: the
-// raw record bytes (which may be deliberately malformed for validation
-// tests), the collection NSID, and the record key.
+// Record bytes may be malformed to test validation independently of CAR loading.
 type declarationRecordSpec struct {
 	Collection string
 	Rkey       string
 	Record     []byte
 }
 
-// declarationCARResult is what buildMultiDeclarationCAR produces: the CAR
-// bytes, each spec's real record CID in spec order, and the signed repo
-// commit's CID and rev — everything a firehose commit event needs. Rev and
-// Commit must be carried into the SyncSubscribeRepos_Commit: an event with a
-// zero Commit link fails CBOR marshal, which closes the stream connection.
+// RecordCIDs follows spec order. Copy Rev and CommitCID into the firehose event:
+// a zero Commit link fails CBOR marshal and closes the stream connection.
 type declarationCARResult struct {
 	CAR        []byte
 	RecordCIDs []cid.Cid
@@ -149,10 +135,8 @@ type declarationCARResult struct {
 	Rev        string
 }
 
-// buildMultiDeclarationCAR is buildDeclarationCARFromBytes for several
-// records at once: one MST and one signed commit carrying every record — the
-// multi-op-per-commit shape com.atproto.repo.applyWrites produces (e.g. a
-// labeler declaring in two collections in one commit).
+// buildMultiDeclarationCAR puts all records in one signed commit and MST,
+// matching an applyWrites call that declares several collections.
 func buildMultiDeclarationCAR(t *testing.T, did string, specs []declarationRecordSpec) declarationCARResult {
 	t.Helper()
 	ctx := context.Background()

@@ -36,11 +36,8 @@ func DecodeLabelsFrame(data []byte) (*community.LabelerSyncSubscribeLabelers_Lab
 	return frame, nil
 }
 
-// EncodeServiceFrame builds a #service output body and returns its CBOR bytes.
-// The record bytes are embedded verbatim (byte-faithful passthrough of the
-// upstream CAR block); a nil record omits the field (delete ops). An empty
-// collection omits that field, matching frames recorded before
-// multi-collection support.
+// EncodeServiceFrame embeds record bytes without re-encoding them.
+// A nil record omits the field for deletes. An empty collection preserves the legacy frame shape.
 func EncodeServiceFrame(seq int64, src, op, collection string, record []byte) ([]byte, error) {
 	var rec *community.RawRecord
 	if record != nil {

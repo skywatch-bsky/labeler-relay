@@ -142,10 +142,7 @@ func TestRoutes_RejectedRequestIncrementsMetric(t *testing.T) {
 		"rejected request must increment the counter via the wired callback")
 }
 
-// TestRoutes_ReadmeExamplesMatchResponses verifies AC.10's concrete check:
-// the README's documented request/response shapes match what the production
-// mux actually returns — a numeric id cursor when more pages exist, and a
-// last_upstream_seq key that is always present (null when never ingested).
+// Exercise the README examples through the production mux to catch route and response drift.
 func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	ts, reg := newRoutesEnv(t, 1000, 100000, loopbackTrusted)
 	ctx := context.Background()
@@ -170,10 +167,6 @@ func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 		UpdatedAt: 1,
 	}))
 
-	// GET .../getLabelers?limit=1 — documented example response: a JSON
-	// object with labelers (each carrying id, did, createdAt, endpoint,
-	// enabled, last_upstream_seq, declarations) and a cursor when more pages
-	// exist.
 	resp, err := http.Get(ts.URL + "/xrpc/community.labeler.sync.getLabelers?limit=1")
 	require.NoError(t, err)
 	var list map[string]any
@@ -189,8 +182,6 @@ func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	require.Equal(t, "bsky.app", first["endpoint"])
 	require.Equal(t, true, first["enabled"])
 	require.Equal(t, float64(35916330), first["last_upstream_seq"])
-	// The view carries the new public fields: a minted id, createdAt, and an
-	// always-present declarations array. source is no longer public.
 	require.Equal(t, float64(1), first["id"])
 	require.NotContains(t, first, "source")
 	require.Contains(t, first, "createdAt")
@@ -199,8 +190,6 @@ func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	require.True(t, ok, "declarations must be an array")
 	require.Empty(t, decs)
 
-	// The cursor is a JSON number — the id of the page's last row — not a
-	// quoted string.
 	require.Equal(t, float64(1), list["cursor"])
 
 	// The next page carries the never-ingested labeler: last_upstream_seq

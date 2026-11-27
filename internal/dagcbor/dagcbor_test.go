@@ -274,11 +274,7 @@ func TestValidateRecordCBOR(t *testing.T) {
 	}
 }
 
-// TestDagCborScanOne verifies the streaming scanner: exact one-item
-// consumption from a bare io.Reader (bytes after the item remain for the
-// caller), verbatim copy semantics, and the same malformed-input rejections
-// as ValidateMap — including huge claimed containers on truncated input,
-// which must fail without allocating.
+// Record decoding must leave later frame fields unread and preserve record bytes.
 func TestDagCborScanOne(t *testing.T) {
 	t.Parallel()
 
@@ -305,7 +301,6 @@ func TestDagCborScanOne(t *testing.T) {
 	require.Equal(t, len(trailing), n)
 	require.Equal(t, trailing, remaining2)
 
-	// A bare reader with only Read drives the whole scan (io.ReadFull path).
 	require.NoError(t, ValidateMap(record))
 
 	// Huge claimed map on truncated input: fails fast, no allocation.
@@ -343,9 +338,7 @@ func TestDagCborScanOne(t *testing.T) {
 	}
 }
 
-// TestScanOneRejectsOverBudgetItem verifies the consumed-bytes budget with a
-// real (not merely claimed) oversized item: a valid byte string just past
-// MaxScanBytes fails rather than buffering unboundedly.
+// Supply the oversized payload, not just its claimed length, to test the byte budget.
 func TestScanOneRejectsOverBudgetItem(t *testing.T) {
 	t.Parallel()
 

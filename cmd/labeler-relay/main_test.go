@@ -69,10 +69,7 @@ func TestSmoke_BootHealthShutdown(t *testing.T) {
 	healthURL := fmt.Sprintf("http://%s/_health", listenAddr)
 	waitForHTTP(t, healthURL, 5*time.Second)
 
-	// Verify the health response is valid JSON with the expected shape.
-	// The body is fully read and closed BEFORE cancel: an unread response
-	// body holds the keep-alive connection open against
-	// httpServer.Shutdown.
+	// Read and close the response before cancel so its connection does not delay Shutdown.
 	resp, err := http.Get(healthURL)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -83,21 +80,10 @@ func TestSmoke_BootHealthShutdown(t *testing.T) {
 	// Cancel context to trigger graceful shutdown.
 	cancel()
 
-	// Condition-based wait: run() must return within a bounded time. The
-	// budget is 8s, deliberately above run()'s own 5s httpServer.Shutdown
-	// deadline: net/http's Shutdown only reaps connections still in
-	// StateNew after 5 seconds (golang/go#22682), so a connection accepted
-	// without a request keeps Shutdown busy until its deadline — and a 5s
-	// test budget raced that exact threshold. 8s still catches real hangs
-	// while tolerating the documented reap rule.
+	// Allow 8s for run's 5s Shutdown deadline. net/http keeps StateNew connections for 5s (golang/go#22682).
 	select {
 	case err := <-done:
-		// Acceptable outcomes: nil or context.Canceled (normal graceful
-		// shutdown), or context.DeadlineExceeded — run()'s own
-		// httpServer.Shutdown deadline (5s) expiring while net/http reaps a
-		// connection still in StateNew, which it only closes after 5 seconds
-		// (golang/go#22682). All three mean the process stopped serving and
-		// exited within its bounded shutdown window.
+		// StateNew connections can exhaust the Shutdown deadline without a process hang.
 		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
 			t.Fatalf("run() returned unexpected error: %v", err)
 		}

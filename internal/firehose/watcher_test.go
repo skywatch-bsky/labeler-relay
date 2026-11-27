@@ -20,9 +20,6 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-// subscribeLabelsPath is the XRPC path for the labeler subscription endpoint.
-// (Restored: it was dropped from watcher_test.go in the endpoint-host fix
-// while later test files kept referencing it, breaking the test build.)
 const subscribeLabelsPath = "/xrpc/com.atproto.label.subscribeLabels"
 
 // newWatcherForTest wires a FirehoseWatcher over a real temp-file store with a
@@ -118,11 +115,7 @@ func sampleService(createdAt string) *bsky.LabelerService {
 
 func strptr(s string) *string { return &s }
 
-// multiDeclarationCommit builds a SyncSubscribeRepos_Commit carrying one REAL
-// CAR with one create op per spec — the multi-op-per-commit shape
-// com.atproto.repo.applyWrites produces (e.g. a labeler declaring in two
-// collections in one commit), each op referencing its record by its real
-// content CID.
+// multiDeclarationCommit models one applyWrites call across several collections.
 func multiDeclarationCommit(t *testing.T, did string, seq int64, specs []declarationRecordSpec) *comatproto.SyncSubscribeRepos_Commit {
 	t.Helper()
 	built := buildMultiDeclarationCAR(t, did, specs)
@@ -155,8 +148,6 @@ func countServiceEvents(t *testing.T, s *store.Store, did string) int {
 	return n
 }
 
-// countServiceEventsOp counts the stored #service events for a labeler with a
-// given op ("create"/"update"/"delete"), by decoding each frame.
 func countServiceEventsOp(t *testing.T, s *store.Store, did, op string) int {
 	t.Helper()
 	var frames [][]byte
@@ -199,8 +190,6 @@ func maxServiceSeq(t *testing.T, s *store.Store, did string) int64 {
 	return seq
 }
 
-// latestServiceFrame reads the most recent stored #service frame for a labeler
-// and decodes it via the store's own frame decoder.
 func latestServiceFrame(t *testing.T, s *store.Store, did string) *community.LabelerSyncSubscribeLabelers_Service {
 	t.Helper()
 	var frame []byte
@@ -216,7 +205,6 @@ func latestServiceFrame(t *testing.T, s *store.Store, did string) *community.Lab
 	return decoded
 }
 
-// declarationsFor reads the tracked declaration collections via the registry.
 func declarationsFor(t *testing.T, w *FirehoseWatcher, did string) []string {
 	t.Helper()
 	decs, err := w.registry.DeclarationsFor(context.Background(), did)
@@ -299,11 +287,7 @@ func TestWatcherHandleCommitDiscoversAndEmits(t *testing.T) {
 	}
 }
 
-// TestWatcherDiscoversAllDeclarationCollections verifies AC.5: a create op in
-// any of the three declaration collections registers the labeler exactly like
-// an app.bsky declaration — endpoint resolved, row present, poke fired — and
-// the stored frame carries the collection plus the record bytes byte-identical
-// to the upstream CAR block.
+// All declaration collections must preserve raw record bytes in stored frames.
 func TestWatcherDiscoversAllDeclarationCollections(t *testing.T) {
 	t.Parallel()
 
@@ -723,11 +707,7 @@ func TestWatcherRedeclareReenablesOnlyFromZeroDeclarations(t *testing.T) {
 	})
 }
 
-// TestWatcherDeleteReplaysAfterNonContextFailure verifies AC.12(b): a
-// NON-cancellation ApplyServiceOp failure (here: the events write is blocked
-// by a trigger) makes handleCommit return an error without staging the
-// commit — the staged cursor stays before it — and replaying the commit
-// disables the labeler and emits exactly one delete event.
+// Store failures, not just cancellation, must leave the commit available for replay.
 func TestWatcherDeleteReplaysAfterNonContextFailure(t *testing.T) {
 	t.Parallel()
 
@@ -815,11 +795,8 @@ func TestWatcherDeleteReplaysAfterNonContextFailure(t *testing.T) {
 	}
 }
 
-// TestWatcherMultiOpCommitReplayDoesNotDuplicate pins the replay-dedup
-// contract for multi-op commits: when one commit carries several declaration
-// ops and a LATER op fails mid-commit, the redial replay must not re-emit the
-// earlier op's already-committed #service event — exactly one event per
-// upstream op across redials and restarts.
+// A later op can fail after an earlier transaction commits. Replay must not
+// emit the earlier op's event again.
 func TestWatcherMultiOpCommitReplayDoesNotDuplicate(t *testing.T) {
 	t.Parallel()
 
@@ -903,10 +880,7 @@ func TestWatcherMultiOpCommitReplayDoesNotDuplicate(t *testing.T) {
 	}
 }
 
-// TestWatcherMalformedRecordSkipsOnlyThatOp pins the per-op granularity of
-// record validation: a malformed declaration record in one op is skipped and
-// logged, and any VALID sibling op in the same commit still registers and
-// emits its event — the commit counts as processed.
+// Record validation failures must not discard valid siblings in the same commit.
 func TestWatcherMalformedRecordSkipsOnlyThatOp(t *testing.T) {
 	t.Parallel()
 
@@ -943,10 +917,7 @@ func TestWatcherMalformedRecordSkipsOnlyThatOp(t *testing.T) {
 	}
 }
 
-// TestWatcherStructuralSkipKeepsValidSibling pins the watcher-level
-// granularity of structural failures: a create op with a missing CID is
-// skipped (logged at Warn), its valid sibling in the same commit registers
-// and emits its event, and the commit counts as processed.
+// Missing CIDs must not discard valid siblings or prevent cursor staging.
 func TestWatcherStructuralSkipKeepsValidSibling(t *testing.T) {
 	t.Parallel()
 
@@ -978,10 +949,7 @@ func TestWatcherStructuralSkipKeepsValidSibling(t *testing.T) {
 	}
 }
 
-// TestWatcherNonSelfDeleteDoesNotDisable pins the self-keyed declaration
-// contract: a delete at a record key other than "self" is not a declaration
-// op (all three declaration schemas are literal:self), so it must not remove
-// the tracked self declaration or disable the labeler.
+// A non-self delete must not remove the tracked self declaration.
 func TestWatcherNonSelfDeleteDoesNotDisable(t *testing.T) {
 	t.Parallel()
 
@@ -1031,10 +999,7 @@ func TestWatcherNonSelfDeleteDoesNotDisable(t *testing.T) {
 	}
 }
 
-// TestWatcherDeleteReplaysAfterInterruption verifies AC.12(b)'s cancellation
-// pattern: a context cancelled before the delete op's store write returns
-// context.Canceled without staging the commit; the replay disables the
-// labeler and emits exactly one delete event.
+// Cancellation before the store write must leave the delete available for replay.
 func TestWatcherDeleteReplaysAfterInterruption(t *testing.T) {
 	t.Parallel()
 

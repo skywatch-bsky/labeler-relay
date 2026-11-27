@@ -26,20 +26,10 @@ type LabelerSyncSubscribeLabelers_Labels struct {
 	Labels      []*comatproto.LabelDefs_Label `json:"labels" cborgen:"labels"`
 }
 
-// RawRecord is a pre-encoded DAG-CBOR record embedded verbatim in a frame.
-// The bytes are never re-encoded: MarshalCBOR writes them as-is, and
-// UnmarshalCBOR consumes exactly one CBOR item (a checked scan, so malformed
-// or overflow-prone containers in stored frames are rejected rather than
-// over-read).
-//
-// It is a struct wrapper — not a []byte-derived type — so cbor-gen cannot
-// special-case it as a byte string; the generator emits method calls, the
-// same pattern it uses for indigo's external types. The methods are
-// handwritten and must never be regenerated.
-//
-// The one-item decode is load-bearing: in the frame map, "collection" (10
-// bytes) sorts after "record" (6 bytes), so an over-reading decode would
-// swallow the following field.
+// RawRecord preserves an upstream CAR block's DAG-CBOR bytes without re-encoding.
+// The struct wrapper prevents cbor-gen from treating a []byte-derived type as a byte string.
+// Both handwritten CBOR methods use pointer receivers to match cbor-gen's interfaces.
+// Do not regenerate these methods.
 type RawRecord struct {
 	CBOR []byte
 }
@@ -53,9 +43,8 @@ func (r *RawRecord) MarshalCBOR(w io.Writer) error {
 	return err
 }
 
-// UnmarshalCBOR consumes exactly one CBOR item from cr into r.CBOR. Reads are
-// exact-size, so bytes after the item remain for the containing frame's
-// decode loop.
+// UnmarshalCBOR validates and consumes exactly one DAG-CBOR item.
+// In the frame map, "record" sorts before "collection". Reading past one item corrupts the following field.
 func (r *RawRecord) UnmarshalCBOR(cr io.Reader) error {
 	var buf bytes.Buffer
 	if err := dagcbor.ScanOne(cr, &buf); err != nil {
@@ -65,19 +54,10 @@ func (r *RawRecord) UnmarshalCBOR(cr io.Reader) error {
 	return nil
 }
 
-// LabelerSyncSubscribeLabelers_Service is the #service variant, carrying a
-// labeler service declaration observed via firehose discovery.
-//
-//   - Seq: relay-minted global sequence number
-//   - Src: labeler DID
-//   - Op: firehose operation ("create", "update", "delete")
-//   - Collection: the declaration collection NSID ("" on frames recorded
-//     before multi-collection support; those records are
-//     app.bsky.labeler.service)
-//   - Record: the full declaration record, byte-faithful (nil for delete)
-//
-// FIDELITY NOTE: the service record is the upstream CAR block's raw DAG-CBOR
-// bytes, passed through verbatim — not decoded and re-encoded.
+// LabelerSyncSubscribeLabelers_Service carries a firehose declaration in a #service frame.
+// Seq is relay-minted. Src is the labeler DID. Op is create, update, or delete.
+// An empty Collection identifies a legacy app.bsky.labeler.service frame.
+// Record preserves the upstream CAR block bytes and is nil for delete.
 type LabelerSyncSubscribeLabelers_Service struct {
 	Seq        int64      `json:"seq" cborgen:"seq"`
 	Src        string     `json:"src" cborgen:"src"`

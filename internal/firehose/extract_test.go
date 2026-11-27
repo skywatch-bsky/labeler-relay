@@ -16,10 +16,7 @@ import (
 	"github.com/scarndp/labeler-relay/internal/dagcbor"
 )
 
-// TestExtractLabelerDeclarationOpsFilters tests that only declaration
-// collection ops are extracted. The test uses minimal CAR data because
-// extraction returns early when no declaration ops are present, so the CAR is
-// never loaded—only the path filtering guard is exercised.
+// Unrelated ops must return before loading the deliberately invalid CAR.
 func TestExtractLabelerDeclarationOpsFilters(t *testing.T) {
 	t.Parallel()
 
@@ -197,9 +194,7 @@ func TestExtractLabelerDeclarationOpsUnknownFieldsRecord(t *testing.T) {
 	require.Equal(t, record, ops[0].Record)
 }
 
-// TestExtractRejectsMalformedRecord verifies AC.13's extraction-level guard:
-// a CAR whose record block is malformed CBOR (a map claiming two pairs with
-// one present) makes ExtractLabelerDeclarationOps return an error.
+// Malformed record bytes must skip the op without failing CAR extraction.
 func TestExtractRejectsMalformedRecord(t *testing.T) {
 	t.Parallel()
 
@@ -227,12 +222,7 @@ func TestExtractRejectsMalformedRecord(t *testing.T) {
 	require.Contains(t, skipped[0].Err.Error(), "invalid declaration record")
 }
 
-// TestExtractSkipsStructurallyBrokenOps pins the per-op granularity of
-// structural failures: a create/update op with a missing CID, an op
-// referencing a block absent from the CAR, or a record over the decode
-// budget skips only that op — the valid sibling in the same commit is
-// still extracted and extraction does not error. Only a CAR that fails to
-// load is a hard error.
+// Missing CIDs, missing blocks, and oversized records must not discard valid siblings.
 func TestExtractSkipsStructurallyBrokenOps(t *testing.T) {
 	t.Parallel()
 
@@ -244,8 +234,8 @@ func TestExtractSkipsStructurallyBrokenOps(t *testing.T) {
 	// missing-CID and unknown-block cases.
 	dummyRecord := []byte{0xa1, 0x61, 'a', 0x01}
 
-	// An oversize but well-formed record: a map holding one byte string
-	// larger than the ScanOne decode budget.
+	// The byte string equals the budget. Map and string headers put the
+	// complete record over the limit.
 	oversize := make([]byte, 0, dagcbor.MaxScanBytes+32)
 	oversize = append(oversize, 0xa1, 0x64, 'd', 'a', 't', 'a', 0x5b)
 	var lenBuf [8]byte
@@ -310,7 +300,6 @@ func TestExtractSkipsStructurallyBrokenOps(t *testing.T) {
 	})
 }
 
-// mustMarshalCBOR marshals a record to CBOR bytes for byte-equality checks.
 func mustMarshalCBOR(t *testing.T, svc *bsky.LabelerService) []byte {
 	t.Helper()
 	var buf bytes.Buffer

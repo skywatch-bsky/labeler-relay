@@ -1,8 +1,4 @@
 // pattern: Imperative Shell
-// Tests for the idempotent labelers schema migration run by Store.Open: the
-// identity state machine (ancient / pre-change / fresh / both-columns), the
-// created_at/declared_at and declarations backfills, and the rollback
-// contract (a mid-backfill failure leaves the database untouched).
 
 package store_test
 
@@ -19,9 +15,7 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-// ancientShapeDDL is the labelers table as it existed before observation
-// tracking: no identity column at all. Hand-written so the fixture has no
-// dependency on the current schema.sql.
+// Keep the schema without identity columns independent of schema.sql so schema changes cannot update the migration fixture.
 const ancientShapeDDL = `
 CREATE TABLE labelers (
     did               TEXT PRIMARY KEY,
@@ -34,9 +28,7 @@ CREATE TABLE labelers (
     updated_at        INTEGER NOT NULL
 );`
 
-// preChangeShapeDDL is the labelers table as it existed immediately before
-// the id rename: observed_seq present, plus the legacy unique index the old
-// migration created on every open.
+// Include the legacy index to test its replacement when observed_seq becomes id.
 const preChangeShapeDDL = `
 CREATE TABLE labelers (
     did               TEXT PRIMARY KEY,
@@ -51,29 +43,19 @@ CREATE TABLE labelers (
 );
 CREATE UNIQUE INDEX idx_labelers_observed_seq ON labelers(observed_seq);`
 
-// ancientRows seeds the three canonical fixture rows in rowid order:
-//   - old-aaa: manual with a resolved endpoint — NOT successfully
-//     discovered (source is manual), so it stays undeclared;
-//   - old-bbb: firehose with a resolved endpoint and a later last_error —
-//     successfully discovered despite the error (deliberately not
-//     "last_error IS NULL");
-//   - old-ccc: firehose with an empty endpoint — the RecordError-only shape,
-//     never declared.
+// Only old-bbb represents a discovered declaration, despite its later error.
+// A manual endpoint and a RecordError-only row must not count as declarations.
 const ancientRows = `INSERT INTO labelers(did, endpoint, source, enabled, last_error, updated_at) VALUES
 	('did:plc:old-aaa', 'https://aaa.example.com', 'manual',   1, NULL,                100),
 	('did:plc:old-bbb', 'https://bbb.example.com', 'firehose', 1, 'later error',       200),
 	('did:plc:old-ccc', '',                        'firehose', 0, 'resolution failed', 300)`
 
-// preChangeRows seeds the same rows with non-sequential observed_seq values
-// (5, 3, 9) so the rename's value preservation is distinguishable from any
-// re-minting.
+// Non-sequential observed_seq values expose accidental reminting during the rename.
 const preChangeRows = `INSERT INTO labelers(did, endpoint, source, enabled, last_error, observed_seq, updated_at) VALUES
 	('did:plc:old-aaa', 'https://aaa.example.com', 'manual',   1, NULL,                5, 100),
 	('did:plc:old-bbb', 'https://bbb.example.com', 'firehose', 1, 'later error',       3, 200),
 	('did:plc:old-ccc', '',                        'firehose', 0, 'resolution failed', 9, 300)`
 
-// createShapeDB writes a fixture database at path with the given DDL and
-// rows.
 func createShapeDB(t *testing.T, path, ddl, rows string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -112,7 +94,6 @@ func rawExec(t *testing.T, path, stmt string) {
 	}
 }
 
-// rawQuery runs a single-row query and scans it into dest.
 func rawQueryRow(t *testing.T, path, query string, dest ...any) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -178,8 +159,6 @@ func rawIndexExists(t *testing.T, path, index string) bool {
 	return true
 }
 
-// rawIDByRowid returns the id column ordered by rowid. A SELECT over id
-// fails if the column is missing, which is itself the assertion.
 func rawIDByRowid(t *testing.T, path string) []int64 {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -209,14 +188,12 @@ func rawIDByRowid(t *testing.T, path string) []int64 {
 	return ids
 }
 
-// fixtureRow is one row of a fixture database read outside the store.
 type fixtureRow struct {
 	did        string
 	createdAt  sql.NullInt64
 	declaredAt sql.NullInt64
 }
 
-// rawTimestampsByRowid returns created_at/declared_at ordered by rowid.
 func rawTimestampsByRowid(t *testing.T, path string) []fixtureRow {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -243,7 +220,6 @@ func rawTimestampsByRowid(t *testing.T, path string) []fixtureRow {
 	return out
 }
 
-// rawDeclarations returns the declaration collections held by did.
 func rawDeclarations(t *testing.T, path, did string) []string {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -302,10 +278,6 @@ func rawEndpointsByRowid(t *testing.T, path string) []string {
 	return endpoints
 }
 
-// TestMigrateAncientAddsIDBackfillsByRowid verifies AC.4's ancient path:
-// a database with neither identity column gets id added and backfilled in
-// rowid order, the unique index is created, the obsolete observed_seq column
-// is never created, and reopening neither re-mints nor resets anything.
 func TestMigrateAncientAddsIDBackfillsByRowid(t *testing.T) {
 	ctx := context.Background()
 
@@ -371,9 +343,6 @@ func TestMigrateAncientAddsIDBackfillsByRowid(t *testing.T) {
 	}
 }
 
-// TestMigrateRenamesObservedSeqToID verifies AC.4's pre-change path: the
-// observed_seq column is renamed to id preserving every stored value, the
-// legacy index is replaced, and the obsolete column name is gone.
 func TestMigrateRenamesObservedSeqToID(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "prechange.db")
 	createPreChangeDB(t, dbPath)
@@ -401,10 +370,6 @@ func TestMigrateRenamesObservedSeqToID(t *testing.T) {
 	}
 }
 
-// TestMigrateFreshSchemaHasID verifies AC.4's fresh path: a brand-new
-// database carries id/created_at/declared_at from schema.sql, the
-// declarations table, the unique index from migrate — and never the legacy
-// column or index.
 func TestMigrateFreshSchemaHasID(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "fresh.db")
 	s, err := store.Open(dbPath)
@@ -432,7 +397,6 @@ func TestMigrateFreshSchemaHasID(t *testing.T) {
 	}
 }
 
-// rawTableExists reports whether the named table exists.
 func rawTableExists(t *testing.T, path, table string) bool {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -447,9 +411,6 @@ func rawTableExists(t *testing.T, path, table string) bool {
 	return err == nil
 }
 
-// TestMigrateIdOnlyReopenIsNoop verifies AC.4's id-only path: a database that
-// already carries id (fresh or previously migrated) reopens with no identity
-// mutation and no error.
 func TestMigrateIdOnlyReopenIsNoop(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "idonly.db")
 	s, err := store.Open(dbPath)
@@ -487,9 +448,6 @@ func TestMigrateIdOnlyReopenIsNoop(t *testing.T) {
 	}
 }
 
-// TestMigrateRejectsBothIdentityColumns verifies AC.4's undefined state: a
-// labelers table carrying both observed_seq and id fails Open with an
-// explicit error.
 func TestMigrateRejectsBothIdentityColumns(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "both.db")
 	createPreChangeDB(t, dbPath)
@@ -504,11 +462,7 @@ func TestMigrateRejectsBothIdentityColumns(t *testing.T) {
 	}
 }
 
-// TestMigrateBackfillsTimestamps verifies AC.4's timestamp backfill:
-// created_at is approximated from updated_at for every row; declared_at is
-// backfilled only for successfully-discovered rows (source='firehose' AND
-// endpoint != ”) — a discovered row with a later error still counts, while
-// manual rows and RecordError-only rows stay NULL.
+// A later discovery error must not exclude a row with a resolved endpoint from declared_at backfill.
 func TestMigrateBackfillsTimestamps(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "timestamps.db")
 	createPreChangeDB(t, dbPath)
@@ -524,7 +478,6 @@ func TestMigrateBackfillsTimestamps(t *testing.T) {
 		t.Fatalf("expected 3 rows, got %d", len(rows))
 	}
 
-	// created_at = updated_at for every row.
 	for i, want := range []int64{100, 200, 300} {
 		got := rows[i].createdAt
 		if !got.Valid || got.Int64 != want {
@@ -533,7 +486,6 @@ func TestMigrateBackfillsTimestamps(t *testing.T) {
 		}
 	}
 
-	// declared_at: only the discovered row (bbb, updated_at=200).
 	for i, want := range []bool{false, true, false} {
 		got := rows[i].declaredAt
 		if want {
@@ -547,10 +499,7 @@ func TestMigrateBackfillsTimestamps(t *testing.T) {
 	}
 }
 
-// TestMigrateBackfillsDeclarationsOnce verifies AC.4's meta-gated
-// declarations backfill: successfully-discovered rows are marked as holding
-// an app.bsky.labeler.service declaration exactly once — a reopen after the
-// labeler deletes that declaration must not re-insert it.
+// Reopen must not restore a declaration deleted after backfill.
 func TestMigrateBackfillsDeclarationsOnce(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "declarations.db")
 	createAncientDB(t, dbPath)
@@ -560,7 +509,6 @@ func TestMigrateBackfillsDeclarationsOnce(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	// Only the discovered row is marked declared.
 	if got := rawDeclarations(t, dbPath, "did:plc:old-bbb"); fmt.Sprint(got) != fmt.Sprint([]string{"app.bsky.labeler.service"}) {
 		t.Fatalf("discovered row must be backfilled as app.bsky-declared, got %v", got)
 	}
@@ -570,7 +518,6 @@ func TestMigrateBackfillsDeclarationsOnce(t *testing.T) {
 		}
 	}
 
-	// The meta gate is set.
 	var gated string
 	rawQueryRow(t, dbPath, `SELECT value FROM meta WHERE key = 'declarations_backfilled'`, &gated)
 	if gated != "1" {
@@ -596,11 +543,7 @@ func TestMigrateBackfillsDeclarationsOnce(t *testing.T) {
 	}
 }
 
-// TestMigrateRecordErrorOnlyRemainsUndeclared verifies AC.4's
-// RecordError-only row: it stays NULL-declared and undeclared after
-// migration, and its first successful declaration with autoSubscribe=true
-// re-enables it — the zero-to-one transition the backfill deliberately
-// preserves.
+// Backfill must preserve the first-declaration re-enable transition for RecordError-only rows.
 func TestMigrateRecordErrorOnlyRemainsUndeclared(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "recorderror.db")
@@ -612,7 +555,6 @@ func TestMigrateRecordErrorOnlyRemainsUndeclared(t *testing.T) {
 	}
 	defer s.Close()
 
-	// The RecordError-only row (empty endpoint) stays undeclared.
 	if got := rawDeclarations(t, dbPath, "did:plc:old-ccc"); len(got) != 0 {
 		t.Fatalf("RecordError-only row must stay undeclared, got %v", got)
 	}
@@ -623,7 +565,6 @@ func TestMigrateRecordErrorOnlyRemainsUndeclared(t *testing.T) {
 		t.Fatalf("RecordError-only row's declared_at must stay NULL, got %d", declaredAt.Int64)
 	}
 
-	// First successful declaration re-enables the disabled row.
 	persist := store.NewLabelPersist(s)
 	res, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op:            "create",
@@ -655,10 +596,7 @@ func TestMigrateRecordErrorOnlyRemainsUndeclared(t *testing.T) {
 	}
 }
 
-// TestMigrateRollsBackOnFailure verifies AC.4's rollback contract: a failure
-// during a migration step aborts the whole step, leaving the database
-// untouched (a non-transactional implementation would leave the column
-// added), and a clean retry after removing the blocker succeeds.
+// A backfill failure must undo the preceding ALTER, not leave a partially migrated schema.
 func TestMigrateRollsBackOnFailure(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "rollback.db")
 	createAncientDB(t, dbPath)
@@ -675,8 +613,6 @@ func TestMigrateRollsBackOnFailure(t *testing.T) {
 		t.Fatal("expected Open to fail while the backfill is blocked")
 	}
 
-	// Untouched: the column was not added and the original rows are
-	// unchanged.
 	if rawColumnExists(t, dbPath, "labelers", "id") {
 		t.Fatal("id must not exist after a rolled-back migration")
 	}
@@ -702,18 +638,10 @@ func TestMigrateRollsBackOnFailure(t *testing.T) {
 	}
 }
 
-// TestMigrateAddsEventDedupAndAppliedOps covers the events-dedup migration
-// on an old-shape database — the upgrade path every existing deployment
-// takes on first boot with this change: an events table predating the
-// dedup_key column gains the column and its unique index, the durable
-// applied_service_ops identity table is created, existing rows survive with
-// NULL keys, and a reopen is a no-op.
 func TestMigrateAddsEventDedupAndAppliedOps(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "old-events.db")
 
-	// The events table exactly as commit bd398f1 shaped it: no dedup_key.
-	// The labelers table is absent so schema.sql creates the fresh shape
-	// (the identity state machine then takes its id-only no-op branch).
+	// Omit dedup_key to exercise the event migration. Let schema.sql create labelers independently.
 	const oldEventsDDL = `
 CREATE TABLE events (
     relay_seq    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -743,7 +671,6 @@ CREATE TABLE events (
 		t.Error("expected applied_service_ops to exist after migration")
 	}
 
-	// The pre-existing rows survive untouched, with NULL dedup keys.
 	var rows, nullKeys int
 	if err := s.DB().QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE dedup_key IS NULL) FROM events`).Scan(&rows, &nullKeys); err != nil {
 		t.Fatalf("count events: %v", err)
@@ -752,8 +679,6 @@ CREATE TABLE events (
 		t.Fatalf("expected 2 surviving rows with NULL dedup keys, got rows=%d nulls=%d", rows, nullKeys)
 	}
 
-	// A service op applied after the migration records its durable identity
-	// and its event-side key, and survives a reopen.
 	if _, err := store.NewLabelPersist(s).ApplyServiceOp(context.Background(), store.ServiceOp{
 		Op: "create", DID: "did:plc:dedup-mig", Collection: "app.bsky.labeler.service", Rkey: "self",
 		Record: []byte{0xa1, 0x61, 'a', 0x01}, Endpoint: "mig.example.com", AutoSubscribe: true,
@@ -771,8 +696,6 @@ CREATE TABLE events (
 	}
 	s.Close()
 
-	// Reopen is a no-op: the column, index, and table are still there and
-	// the identity row survived.
 	s2, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)

@@ -25,12 +25,11 @@ const (
 )
 
 // labelerView is the public projection of a registry labeler row.
-// last_error, require_sig, and the internal updated_at bookkeeping timestamp
-// are deliberately excluded. last_upstream_seq is always emitted: null for
-// labelers that have never ingested, numeric otherwise. updatedAt is the
-// relay-observation timestamp (declared_at), not internal bookkeeping: it is
-// present only when a declaration was observed. declarations is always
-// present and non-null; an empty declaration set serializes as [].
+// id is monotonic. createdAt uses RFC3339 UTC.
+// updatedAt is present exactly when declared_at is set, not the internal updated_at timestamp.
+// declarations is always non-null and uses [] for an empty set.
+// last_upstream_seq is always present, with null for labelers that have never ingested.
+// source, last_error, require_sig, and internal updated_at are not public fields.
 type labelerView struct {
 	ID              int64    `json:"id"`
 	DID             string   `json:"did"`
@@ -42,9 +41,7 @@ type labelerView struct {
 	Declarations    []string `json:"declarations"`
 }
 
-// newLabelerView projects a registry row and its declaration collections to
-// the public view. declarations must be non-nil for the []-not-null JSON
-// emission; the helper normalizes nil to an empty slice.
+// newLabelerView normalizes nil declarations so JSON emits [], not null.
 func newLabelerView(l store.Labeler, declarations []string) labelerView {
 	if declarations == nil {
 		declarations = []string{}
@@ -65,8 +62,7 @@ func newLabelerView(l store.Labeler, declarations []string) labelerView {
 	return v
 }
 
-// formatDatetime renders unix seconds as an atproto datetime: RFC 3339, UTC,
-// whole-second precision, uppercase T and Z.
+// formatDatetime uses whole-second RFC3339 UTC for the public datetime contract.
 func formatDatetime(sec int64) string {
 	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
@@ -86,9 +82,8 @@ func writeXRPCError(w http.ResponseWriter, status int, name, msg string) {
 	_ = json.NewEncoder(w).Encode(xrpcErrorBody{Error: name, Message: msg})
 }
 
-// getLabelersResponse is the JSON body returned by HandleGetLabelers.
-// Cursor (the last row's id) is present only when further pages exist; ids
-// start at 1, so 0 reliably means "absent" under omitempty.
+// getLabelersResponse includes the last row's id as Cursor only when more pages exist.
+// IDs start at 1, so omitempty can use zero for an absent cursor.
 type getLabelersResponse struct {
 	Labelers []labelerView `json:"labelers"`
 	Cursor   int64         `json:"cursor,omitempty"`
@@ -142,6 +137,7 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Read rows and declarations from one SQLite snapshot to prevent mixed-state views.
 	labelers, declarations, err := s.registry.ListWithDeclarations(ctx)
 	if err != nil {
 		s.log.Error("query: failed to read labelers and declarations", "err", err)
@@ -149,8 +145,7 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// List returns rows in ascending id order (first-observed first); apply
-	// the enabled filter in memory to keep a single read path.
+	// Filter the id-ordered snapshot in memory to keep one read path.
 	filtered := make([]store.Labeler, 0, len(labelers))
 	for _, l := range labelers {
 		if enabledFilter == nil || l.Enabled == *enabledFilter {
@@ -158,10 +153,7 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Keyset pagination: skip rows at or before the cursor id, then take one
-	// page. A cursor past the current maximum (or past a range whose rows
-	// were later disabled by the filter) yields an empty or partial page with
-	// no cursor — a clean end-of-walk, never an error.
+	// Keyset pagination uses the row id. A cursor beyond the filtered rows ends the walk without an error.
 	start := 0
 	if hasCursor {
 		for start < len(filtered) && filtered[start].ID <= cursor {
@@ -180,8 +172,6 @@ func (s *Server) HandleGetLabelers(w http.ResponseWriter, r *http.Request) {
 
 	resp := getLabelersResponse{Labelers: views}
 	if end < len(filtered) {
-		// labelerView serializes the row's id, but the response cursor comes
-		// from the store rows, not the views.
 		resp.Cursor = filtered[end-1].ID
 	}
 
@@ -209,6 +199,7 @@ func (s *Server) HandleGetLabeler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the row and declarations from one SQLite snapshot to prevent a mixed-state view.
 	labeler, declarations, found, err := s.registry.GetWithDeclarations(ctx, did.String())
 	if err != nil {
 		s.log.Error("query: failed to read labeler and declarations", "err", err)

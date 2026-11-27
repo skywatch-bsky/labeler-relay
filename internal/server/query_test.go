@@ -78,11 +78,7 @@ func seedLabeler(t *testing.T, env *queryTestEnv, did, endpoint, source string, 
 	}
 }
 
-// seedLabelerRow inserts one labelers row plus its declaration rows with
-// fully known values, so view-shape tests can assert exact timestamps,
-// ids, and declaration sets. id is minted by the caller; the row-insertion
-// paths (Upsert, RecordError, ApplyServiceOp) are covered by the store and
-// firehose tests.
+// Seed SQL directly to fix IDs and timestamps independently of the insertion paths.
 func seedLabelerRow(t *testing.T, env *queryTestEnv, did, endpoint, source string, enabled bool,
 	lastUpstreamSeq *int64, id, createdAt int64, declaredAt *int64, collections []string) {
 	t.Helper()
@@ -156,32 +152,21 @@ func labelerDIDs(body map[string]any) []string {
 	return dids
 }
 
-// viewBaseKeys is labelerView's always-present key set; updatedAt is the only
-// conditional key.
+// updatedAt is the only conditional key.
 var viewBaseKeys = []string{"id", "did", "createdAt", "endpoint", "enabled",
 	"last_upstream_seq", "declarations"}
 
-// TestGetLabelersViewShape verifies AC.2 for the list endpoint: the exact
-// field set (id, createdAt, conditional updatedAt, endpoint, enabled,
-// last_upstream_seq, declarations — no source), exact expected RFC3339
-// strings from known unix seconds, updatedAt present only for declared rows,
-// and declarations always present and non-null (empty serializes as []).
-//
-// The seeded ids deliberately order the DIDs non-lexically, so the id order
-// the list must reproduce is distinguishable from DID order.
+// Non-lexical DIDs distinguish ID order from DID order.
 func TestGetLabelersViewShape(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 
-	// Discovered labeler holding two declarations; updatedAt present.
+	// Cover discovery with declarations, manual registration, and discovery failure.
 	seedLabelerRow(t, env, "did:plc:declared", "declared.example.com", "firehose", true, ptrInt64(77),
 		1, 1735689540, ptrInt64(1735689600),
 		[]string{"app.bsky.labeler.service", "town.delve.labeler.service"})
-	// Manual labeler: no declarations, no updatedAt. id=2 keeps it after
-	// "did:plc:errow" lexically, so id order ≠ DID order here.
 	seedLabelerRow(t, env, "did:plc:manual", "manual.example.com", "manual", false, nil,
 		2, 1704067200, nil, nil)
-	// Discovery-error row: empty endpoint, never declared.
 	seedLabelerRow(t, env, "did:plc:errow", "", "firehose", false, nil,
 		3, 1704067260, nil, nil)
 
@@ -197,12 +182,10 @@ func TestGetLabelersViewShape(t *testing.T) {
 	manual, _ := items[1].(map[string]any)
 	errRow, _ := items[2].(map[string]any)
 
-	// id order, not DID order.
 	require.Equal(t, "did:plc:declared", declared["did"])
 	require.Equal(t, "did:plc:manual", manual["did"])
 	require.Equal(t, "did:plc:errow", errRow["did"])
 
-	// Exact field sets: updatedAt only on the declared row.
 	require.ElementsMatch(t, append(append([]string(nil), viewBaseKeys...), "updatedAt"), mapKeys(declared))
 	require.ElementsMatch(t, viewBaseKeys, mapKeys(manual))
 	require.ElementsMatch(t, viewBaseKeys, mapKeys(errRow))
@@ -213,12 +196,10 @@ func TestGetLabelersViewShape(t *testing.T) {
 		require.NotContains(t, item, "updated_at", "internal bookkeeping timestamp is not the public updatedAt")
 	}
 
-	// ids straight from the seeded rows.
 	require.Equal(t, float64(1), declared["id"])
 	require.Equal(t, float64(2), manual["id"])
 	require.Equal(t, float64(3), errRow["id"])
 
-	// Exact RFC3339 UTC strings from the seeded unix seconds.
 	require.Equal(t, "2024-12-31T23:59:00Z", declared["createdAt"])
 	require.Equal(t, "2025-01-01T00:00:00Z", declared["updatedAt"])
 	require.Equal(t, "2024-01-01T00:00:00Z", manual["createdAt"])
@@ -226,8 +207,6 @@ func TestGetLabelersViewShape(t *testing.T) {
 	require.NotContains(t, manual, "updatedAt", "never-declared row must omit updatedAt")
 	require.NotContains(t, errRow, "updatedAt")
 
-	// Declarations: the declared row's collections in collection order; the
-	// others' empty — serialized as [], never null.
 	decs, ok := declared["declarations"].([]any)
 	require.True(t, ok, "declarations must be an array")
 	require.Equal(t, []any{"app.bsky.labeler.service", "town.delve.labeler.service"}, decs)
@@ -237,8 +216,6 @@ func TestGetLabelersViewShape(t *testing.T) {
 		require.Empty(t, empty)
 	}
 
-	// last_upstream_seq is always present: numeric when ingested, null when
-	// not.
 	require.Equal(t, float64(77), declared["last_upstream_seq"])
 	require.Nil(t, manual["last_upstream_seq"],
 		"never-ingested row must emit last_upstream_seq as null")
@@ -246,10 +223,6 @@ func TestGetLabelersViewShape(t *testing.T) {
 	require.Equal(t, "", errRow["endpoint"], "discovery-error row exposes its empty endpoint")
 }
 
-// TestGetLabelerViewShape verifies AC.2 for the single lookup: the exact
-// field set on both declared and never-declared rows, exact expected
-// RFC3339 strings, null last_upstream_seq as a present key, and
-// declarations serialized as [].
 func TestGetLabelerViewShape(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
@@ -281,8 +254,6 @@ func TestGetLabelerViewShape(t *testing.T) {
 	require.Equal(t, "2025-01-01T00:00:00Z", declared["updatedAt"])
 	require.Equal(t, []any{"app.bsky.labeler.service"}, declared["declarations"])
 
-	// Never-declared row: last_upstream_seq present as null, no updatedAt,
-	// declarations as [].
 	never := fetch("did:plc:never")
 	require.ElementsMatch(t, viewBaseKeys, mapKeys(never))
 	require.Contains(t, never, "last_upstream_seq",
@@ -328,16 +299,11 @@ func TestQuery_GetLabelers_EnabledFilter(t *testing.T) {
 	assertXRPCError(t, resp, "InvalidRequest")
 }
 
-// TestGetLabelersPaginationWalk verifies AC.9: page N+1 contains exactly the
-// rows with id > cursor; the response cursor is the numeric id of the page's
-// last row; the final page omits cursor; walking pages covers every row
-// exactly once in id order.
 func TestGetLabelersPaginationWalk(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 
-	// DIDs deliberately out of lexical order; insertion order mints ids in
-	// that order, which the walk must reproduce.
+	// Non-lexical DIDs distinguish insertion order from DID order.
 	dids := []string{"did:plc:p5", "did:plc:p3", "did:plc:p1", "did:plc:p4", "did:plc:p2"}
 	for i, did := range dids {
 		seedLabeler(t, env, did, fmt.Sprintf("p%d.example.com", i+1), "manual", true, nil)
@@ -366,8 +332,6 @@ func TestGetLabelersPaginationWalk(t *testing.T) {
 			// Cursorless response is the last page.
 			break
 		}
-		// The cursor is the id of the page's last row and must advance
-		// monotonically across pages.
 		require.Greater(t, int64(next), cursor, "cursor must advance monotonically")
 		cursor = int64(next)
 	}
@@ -404,9 +368,6 @@ func TestGetLabelersCursorInvalid(t *testing.T) {
 	require.NotContains(t, body, "cursor")
 }
 
-// TestQuery_GetLabelers_DefaultLimit verifies the default-50 page size and
-// that the final page omits cursor while a full page carries the numeric id
-// cursor.
 func TestQuery_GetLabelers_DefaultLimit(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
@@ -517,9 +478,7 @@ func TestQuery_GetLabeler_StoreFailure(t *testing.T) {
 	assertXRPCError(t, resp, "InternalServerError")
 }
 
-// TestQuery_LexiconValues verifies AC.8's representability requirement: a
-// discovery-error row's empty endpoint and empty declarations round-trip
-// through both endpoints.
+// Discovery can fail before an endpoint or declaration is available. Both query APIs must represent that row.
 func TestQuery_LexiconValues(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()

@@ -10,16 +10,12 @@ import (
 	"unicode/utf8"
 )
 
-// ScanOne reads exactly one CBOR item from r, copying every consumed byte to
-// w (which may be nil). It never buffers beyond the current item and never
-// allocates from a claimed length; a definite-length container is consumed
-// item by item, so a header claiming more items than the input holds fails
-// with a truncation error rather than looping or over-reading. The whole item
-// is bounded by MaxScanBytes and the nesting depth by maxDepth.
+// ScanOne reads exactly one DAG-CBOR item from r and copies its bytes to w,
+// which may be nil. MaxScanBytes bounds consumed bytes and string allocations.
+// Nesting is limited to maxDepth (64).
 //
-// Works with any io.Reader, including a cbor-gen CborReader positioned
-// mid-frame: reads are exact-size, so bytes after the item remain for the
-// caller.
+// Exact-size reads leave subsequent frame fields for the caller, including
+// when r is a cbor-gen CborReader positioned mid-frame.
 func ScanOne(r io.Reader, w io.Writer) error {
 	sc := &streamScanner{r: r, w: w}
 	return sc.value(0)
@@ -93,7 +89,6 @@ func (s *streamScanner) initial() (maj byte, extra uint64, err error) {
 	return maj, decodeArg(arg[:n]), nil
 }
 
-// value consumes one complete item from the stream.
 func (s *streamScanner) value(depth int) error {
 	if depth > maxDepth {
 		return fmt.Errorf("dagcbor: nesting deeper than %d levels", maxDepth)
@@ -108,10 +103,8 @@ func (s *streamScanner) value(depth int) error {
 	case majByteString, majTextString:
 		return s.stringItem(maj, extra)
 	case majArray:
-		// Overflow safety by iteration, not a remaining-length pre-check (an
-		// io.Reader cannot expose one): each element consumes at least one
-		// real byte, so a huge claimed count fails on EOF or the scan budget
-		// without any counter that could wrap and without allocating.
+		// Each element consumes real bytes. Huge counts reach EOF or the byte
+		// budget without overflowing a remaining-value counter.
 		for i := uint64(0); i < extra; i++ {
 			if err := s.value(depth + 1); err != nil {
 				return err
@@ -194,8 +187,6 @@ func (s *streamScanner) cidPayload() error {
 	return checkCID(payload)
 }
 
-// readBounded consumes exactly extra bytes (bounded by the scan budget) and
-// returns them.
 func (s *streamScanner) readBounded(extra uint64) ([]byte, error) {
 	if extra > MaxScanBytes {
 		return nil, fmt.Errorf("dagcbor: item of %d bytes exceeds the %d byte scan budget", extra, MaxScanBytes)

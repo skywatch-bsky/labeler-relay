@@ -247,18 +247,9 @@ func awaitHead(t *testing.T, persist *store.LabelPersist, want int64) {
 	}
 }
 
-// TestShutdownMidCommitReplaysCommit checks that a commit interrupted by a
-// graceful shutdown is not counted as processed. The watcher must leave its
-// cursor at the last fully processed commit so that the restart replays the
-// interrupted one, instead of resuming after it and silently dropping the
-// labeler ops that never ran.
-//
-// The first case is the shape a real repository produces: the labeler service
-// record is a singleton at rkey "self", so a commit carries one labeler op.
-// The second is the multi-op shape com.atproto.repo.applyWrites produces — a
-// labeler declaring in two collections in one commit — where an interrupted
-// later op must neither drop the earlier op nor duplicate its event on
-// replay.
+// Shutdown must leave the cursor before an incomplete commit to avoid losing
+// unapplied ops. Cases cover one self-keyed declaration and an applyWrites
+// commit with two collections, where replay must deduplicate the completed op.
 func TestShutdownMidCommitReplaysCommit(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -333,11 +324,8 @@ func TestShutdownMidCommitReplaysCommit(t *testing.T) {
 					tc.gateAt, len(tc.collections), got, rowFound, row.Enabled, row.LastError, head, resolver.callCount())
 			}
 
-			// Restart over the same store with a resolver that answers at once.
-			// The firehose is asked for everything after 9, the commit replays,
-			// and every labeler op in it completes: the ops that committed
-			// before the stop are deduplicated — exactly one event per upstream
-			// op — and the interrupted one joins them.
+			// Reuse the store so replay sees the completed op's dedup key.
+			// The new resolver does not block the interrupted op.
 			restarted := NewFirehoseWatcher(fh.URL(), registry, persist, &gatedResolver{}, st, func() {}, true,
 				slog.New(slog.NewTextHandler(io.Discard, nil)))
 			restarted.SetCursorFlushThresholds(1_000_000, time.Hour)

@@ -22,12 +22,8 @@ const (
 	CursorOutdated
 )
 
-// IngestEvent is what the slurper (Phase 3) and firehose watcher (Phase 4)
-// hand to PersistIngest. Exported: it is the cross-package ingest entrypoint.
-//
-// The firehose watcher's service events go through ApplyServiceOp instead,
-// which applies the declaration registry transition and the event atomically;
-// PersistIngest remains the labels path and the direct event entrypoint.
+// IngestEvent is input to PersistIngest for labels and direct event writes.
+// The watcher must use ApplyServiceOp to commit declaration changes and service events together.
 type IngestEvent struct {
 	Kind        string // "labels" | "service"
 	LabelerDID  string

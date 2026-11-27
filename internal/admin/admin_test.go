@@ -471,10 +471,7 @@ func TestAdminAPI(t *testing.T) {
 	})
 }
 
-// TestAdminListOmitsIDAndExposesCreatedAt verifies AC.10: the admin add,
-// patch, and list responses encode store.Labeler directly; they add the
-// CreatedAt/DeclaredAt keys but must not leak the row's ID property
-// (regression guard for its json:"-" tag).
+// Admin responses encode store.Labeler directly. Guard its json:"-" ID tag while allowing CreatedAt and DeclaredAt.
 func TestAdminListOmitsIDAndExposesCreatedAt(t *testing.T) {
 	_, api, token := setupTestEnv(t)
 	ctx := context.Background()
@@ -491,8 +488,7 @@ func TestAdminListOmitsIDAndExposesCreatedAt(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code)
 	assertAdminJSONShape(t, rec.Body.String())
 
-	// Precondition: the stored row carries a minted id and created_at, so a
-	// leak would actually show up in the responses below.
+	// Use populated internal fields so the JSON-tag regression cannot pass with an empty row.
 	stored, found, err := api.registry.Get(ctx, "did:plc:labeler1")
 	require.NoError(t, err)
 	require.True(t, found)
@@ -518,8 +514,6 @@ func TestAdminListOmitsIDAndExposesCreatedAt(t *testing.T) {
 	assertAdminJSONShape(t, rec.Body.String())
 }
 
-// assertAdminJSONShape checks that raw is valid JSON carrying no ID property
-// anywhere while exposing the additive CreatedAt and DeclaredAt keys.
 func assertAdminJSONShape(t *testing.T, raw string) {
 	t.Helper()
 	var decoded any

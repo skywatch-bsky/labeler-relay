@@ -15,11 +15,8 @@ import (
 	"github.com/scarndp/labeler-relay/internal/dagcbor"
 )
 
-// declarationCollections is the set of labeler service declaration record
-// collections the watcher recognizes: a labeler is discovered by declaring a
-// record in any of these. The three schemas are structurally identical
-// (self-keyed records with createdAt and policies), differing only in the
-// namespace of their policies ref.
+// declarationCollections recognizes app.bsky, town.delve, and so.sprk labeler
+// declarations. All three schemas require the literal "self" record key.
 var declarationCollections = map[string]bool{
 	"app.bsky.labeler.service":   true,
 	"town.delve.labeler.service": true,
@@ -31,7 +28,7 @@ var declarationCollections = map[string]bool{
 type LabelerDeclarationOp struct {
 	RepoDID    string // the labeler's DID
 	Action     string // "create" | "update" | "delete"
-	Rkey       string // record key (usually "self")
+	Rkey       string // always "self"
 	Collection string // declaration collection NSID
 	Record     []byte // raw DAG-CBOR record block bytes; nil for delete
 }
@@ -44,18 +41,17 @@ type SkippedDeclaration struct {
 	Err  error
 }
 
-// ExtractLabelerDeclarationOps scans a commit's ops for self-keyed labeler
-// service declaration changes in any declaration collection, loading record
-// bytes from the commit CAR for create/update. Ops at other record keys are
-// ignored because all three schemas require the literal self key.
+// ExtractLabelerDeclarationOps extracts self-keyed declaration changes from
+// the three declaration collections. Other record keys are ignored.
 //
-// Records are kept as raw block bytes (no typed unmarshal) — the relay passes
-// them through byte-faithfully. Each create/update record is validated as one
-// complete, well-formed DAG-CBOR map with no trailing bytes. Malformed or
-// oversized records, missing CIDs, and missing blocks are returned in skipped
-// while valid siblings are still extracted. CAR load failures remain hard errors.
+// Create/update records remain raw block bytes: typed decoding would prevent
+// byte-faithful passthrough. ValidateMap requires one complete DAG-CBOR map
+// with no trailing bytes, but does not enforce lexicon schemas.
+// Malformed or oversized records, missing CIDs, and missing blocks enter skipped
+// without rejecting valid siblings. CAR load failures return an error.
 //
-// Allocation-light: returns early when no self-keyed declaration ops are present.
+// No matching ops means no CAR load. Delete-only commits still load the CAR
+// to validate the repository container.
 func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerDeclarationOp, []SkippedDeclaration, error) {
 	if len(commit.Ops) == 0 {
 		return nil, nil, nil

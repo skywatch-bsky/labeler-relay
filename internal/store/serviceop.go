@@ -9,12 +9,7 @@ import (
 	"time"
 )
 
-// ServiceOp describes a single labeler service declaration operation observed
-// on the firehose, applied atomically with its #service event by
-// LabelPersist.ApplyServiceOp. Its replay identity is stored in
-// applied_service_ops independently of event pruning, including for skipped
-// ops; events.dedup_key is a redundant event-side record. CommitSeq 0 disables
-// replay dedup for direct/test callers.
+// ServiceOp is a firehose declaration operation for LabelPersist.ApplyServiceOp.
 type ServiceOp struct {
 	Op            string // "create" | "update" | "delete"
 	DID           string
@@ -22,7 +17,7 @@ type ServiceOp struct {
 	Record        []byte // raw DAG-CBOR record bytes; nil for delete
 	Endpoint      string // resolved upstream endpoint; create/update only
 	AutoSubscribe bool   // whether the zero-to-one re-enable may fire
-	CommitSeq     int64  // upstream firehose commit sequence; 0 disables replay dedup (for direct/test callers) — the watcher always sets it from the commit event
+	CommitSeq     int64  // upstream commit sequence. Zero disables replay dedup. The watcher always sets it.
 	Rkey          string // upstream record key
 }
 
@@ -34,15 +29,10 @@ type ServiceOpResult struct {
 	// untracked declaration: no event or registry change was written, but
 	// replay identity may have been committed.
 	Skipped bool
-	// EnabledChanged reports whether the op flipped the labeler's enabled
-	// state (auto-disable on last-declaration removal, or re-enable on the
-	// zero-to-one declaration transition). Callers use it to decide whether
-	// the slurper needs a reconcile poke.
+	// EnabledChanged tells callers whether to reconcile upstream subscriptions.
 	EnabledChanged bool
 }
 
-// serviceOpWrites carries the intermediate state of an applied op between the
-// registry transition and the commit.
 type serviceOpWrites struct {
 	seq            int64
 	frame          []byte
@@ -50,27 +40,17 @@ type serviceOpWrites struct {
 	enabledChanged bool
 }
 
-// ApplyServiceOp applies a declaration op — the registry transition and its
-// #service event — in one SQLite transaction. It runs under the same persist
-// mutex as PersistIngest, preserving broadcast order == commit order == seq
-// order, and is the only writer of declared_at.
+// ApplyServiceOp commits the registry transition and #service event in one SQLite transaction.
+// It shares PersistIngest's mutex: broadcast order == commit order == seq order.
+// Only ApplyServiceOp writes declared_at, on create, update, and tracked delete.
+// Any error rolls back all changes: no registry mutation, event row, consumed seq, or declared_at change.
 //
-// Semantics:
+// With AutoSubscribe, the first declaration re-enables a disabled firehose row.
+// Removing the last declaration disables an enabled firehose row. Manual rows never change enabled state automatically.
 //
-//   - create/update: tx-scoped firehose upsert (stickiness rules; id and
-//     created_at minted at first insert only), insert-or-ignore the
-//     declaration row, advance declared_at, and re-enable (enabled=1) iff the
-//     labeler held zero declarations before this one, the row is
-//     firehose-sourced, the row was disabled, and AutoSubscribe is set.
-//   - delete: remove the declaration row, advance declared_at, and disable
-//     (enabled=0) iff no declarations remain and the row is firehose-sourced
-//     and enabled. Manual rows are never auto-disabled or auto-enabled.
-//
-// On any error the whole transaction rolls back: no registry mutation, no
-// event row, no seq consumed, no declared_at change. Exactly-once identity is
-// stored in applied_service_ops independently of event pruning, including for
-// skipped ops; events.dedup_key is a redundant event-side record. CommitSeq 0
-// disables replay dedup for direct/test callers.
+// applied_service_ops retains replay identities after event pruning, including skipped deletes.
+// Keys use svc:<commitSeq>/<did>/<collection>/<rkey>/<op>. CommitSeq 0 disables replay dedup.
+// events.dedup_key provides a redundant event-side constraint.
 func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res ServiceOpResult, err error) {
 	if op.Op != "delete" && len(op.Record) == 0 {
 		return res, fmt.Errorf("create/update service op requires record bytes")
@@ -99,8 +79,7 @@ func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res Se
 		return ServiceOpResult{Skipped: true}, nil
 	}
 
-	// Broadcast and head-seq callback still holding mu, matching the
-	// PersistIngest contract.
+	// Hold mu through broadcast to preserve commit and seq order.
 	if p.broadcaster != nil {
 		p.broadcaster(LiveEvent{
 			RelaySeq:   w.seq,
@@ -116,8 +95,6 @@ func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res Se
 	return ServiceOpResult{Seq: w.seq, EnabledChanged: w.enabledChanged}, nil
 }
 
-// applyServiceOpTx runs the registry transition and the #service event
-// persistence for one op inside tx.
 func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op ServiceOp, now int64) (w serviceOpWrites, err error) {
 	dedupKey := fmt.Sprintf("svc:%d/%s/%s/%s/%s", op.CommitSeq, op.DID, op.Collection, op.Rkey, op.Op)
 	if op.CommitSeq == 0 {
@@ -152,8 +129,7 @@ func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op Serv
 			return w, err
 		}
 
-		// Zero-to-one transition detection: count the labeler's declaration
-		// rows BEFORE inserting this one.
+		// Count before insertion to detect the first declaration.
 		var hadDeclarations int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM labeler_declarations WHERE did = ?`, op.DID).Scan(&hadDeclarations); err != nil {
@@ -166,11 +142,7 @@ func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op Serv
 			return w, fmt.Errorf("failed to insert declaration: %w", err)
 		}
 
-		// Re-enable only on the zero-to-one transition, only for
-		// firehose-sourced rows that are currently disabled, and only when
-		// auto-subscribe is on. An operator-disabled row that already holds
-		// a declaration stays disabled when a second collection is added or
-		// an existing declaration is updated.
+		// Preserve operator-disabled rows on updates and additional declarations.
 		if hadDeclarations == 0 && op.AutoSubscribe {
 			result, err := tx.ExecContext(ctx,
 				`UPDATE labelers SET enabled = 1 WHERE did = ? AND source = 'firehose' AND enabled = 0`,
@@ -186,8 +158,7 @@ func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op Serv
 		}
 
 	case "delete":
-		// Skip when the relay never registered this declaration: no event, no
-		// registry change. Idempotent on replay.
+		// An untracked delete must not emit an event or change the registry.
 		var tracked int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM labeler_declarations WHERE did = ? AND collection = ?`,
@@ -211,8 +182,7 @@ func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op Serv
 			return w, fmt.Errorf("failed to count remaining declarations: %w", err)
 		}
 
-		// Auto-disable when the last declaration is gone. The WHERE clause
-		// keeps manual rows enabled regardless.
+		// Do not auto-disable manual rows.
 		if remaining == 0 {
 			result, err := tx.ExecContext(ctx,
 				`UPDATE labelers SET enabled = 0 WHERE did = ? AND source = 'firehose' AND enabled = 1`,
@@ -231,23 +201,17 @@ func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op Serv
 		return w, fmt.Errorf("unknown service op: %s", op.Op)
 	}
 
-	// declared_at advances on every applied declaration op (create, update,
-	// and tracked delete). The labelers row exists in every path that reaches
-	// here: create/update just upserted it, and a tracked delete implies a
-	// labeler_declarations row whose foreign key points at it.
+	// The upsert or tracked declaration's foreign key guarantees that the labeler exists.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE labelers SET declared_at = ? WHERE did = ?`, now, op.DID); err != nil {
 		return w, fmt.Errorf("failed to update declared_at: %w", err)
 	}
 
-	// The event: placeholder insert minting relay_seq, frame encode, update —
-	// the same steps PersistIngest applies.
 	w.seq, w.frame, err = persistServiceEventTx(ctx, tx, op, dedupKey)
 	return w, err
 }
 
-// persistServiceEventTx inserts the events placeholder row (minting
-// relay_seq), encodes the #service frame, and stores it.
+// persistServiceEventTx reserves relay_seq before encoding because the frame contains its own seq.
 func persistServiceEventTx(ctx context.Context, tx *sql.Tx, op ServiceOp, dedupKey string) (seq int64, frame []byte, err error) {
 	ingestTs := timestampMs()
 	var eventDedupKey interface{}

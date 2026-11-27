@@ -118,11 +118,9 @@ func TestHandleCommitCancellationDuringPersistIngest(t *testing.T) {
 			}
 		}
 	}()
-	// Wait until the watcher has resolved the endpoint: it is then blocked
-	// (or about to block) on ApplyServiceOp's persist mutex, which the seed
-	// write holds. The registry upsert now happens inside that same
-	// transaction, so the row cannot appear until the seed releases the
-	// mutex — the resolver call is the observable progress marker.
+	// The seed holds the persist mutex, so ApplyServiceOp cannot expose a row.
+	// The resolver call marks progress before that lock, allowing cancellation
+	// before the declaration transaction starts.
 	deadline := time.Now().Add(10 * time.Second)
 	for resolver.callCount() < 1 {
 		if time.Now().After(deadline) {

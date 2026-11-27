@@ -18,24 +18,14 @@ type Labeler struct {
 	LastUpstreamSeq *int64
 	LastError       string
 	UpdatedAt       int64
-	// ID is the row's monotonically increasing identifier, minted at first
-	// insert and never reused or changed. It is exposed publicly as
-	// labelerView.id, and it backs first-observed ordering and getLabelers
-	// pagination. json:"-" keeps it out of admin JSON, which encodes
-	// store.Labeler directly (admin JSON exposes CreatedAt/DeclaredAt
-	// instead).
+	// ID is minted at first insert, never changed or reused.
+	// It backs labelerView.id, first-observed ordering, and getLabelers pagination.
+	// Admin JSON omits it.
 	ID int64 `json:"-"`
-	// CreatedAt is the row-creation timestamp in unix seconds: set once at
-	// first insert, never updated. Exposed publicly as labelerView.createdAt.
-	// Untagged on purpose: admin JSON carries it as CreatedAt, matching the
-	// existing untagged UpdatedAt.
+	// CreatedAt is set once at first insert, in Unix seconds. It backs labelerView.createdAt.
 	CreatedAt int64
-	// DeclaredAt is the timestamp of the most recently observed declaration
-	// transition, in unix seconds. NULL until a declaration is observed.
-	// Written only by ApplyServiceOp — never by admin upserts, RecordError,
-	// cursor writes, SetEnabled, or SetRequireSig — so the public
-	// labelerView.updatedAt moves exactly when a declaration op is observed.
-	// Untagged on purpose: admin JSON carries it as DeclaredAt.
+	// DeclaredAt backs labelerView.updatedAt, in Unix seconds. It is nil until a declaration transition occurs.
+	// Only ApplyServiceOp writes it. Other registry changes must not advance the public declaration timestamp.
 	DeclaredAt *int64
 }
 
@@ -47,10 +37,8 @@ func NewLabelerRegistry(s *Store) *LabelerRegistry {
 	return &LabelerRegistry{store: s}
 }
 
-// Upsert applies the stickiness rules in its own transaction. The firehose
-// watcher no longer calls this for declaration ops — it goes through
-// LabelPersist.ApplyServiceOp, which applies the registry transition and the
-// #service event in one transaction — but the admin API still does.
+// Upsert preserves operator-controlled state on firehose updates.
+// For declaration operations, use LabelPersist.ApplyServiceOp to commit the registry change and event together.
 func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 	tx, err := r.store.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -66,23 +54,7 @@ func (r *LabelerRegistry) Upsert(ctx context.Context, labeler Labeler) error {
 	return nil
 }
 
-// upsertLabelerTx applies the Upsert write inside an existing transaction, so
-// ApplyServiceOp can combine the registry transition with the event write in
-// one SQLite transaction.
-//
-// Stickiness rule: firehose upserts only refresh endpoint and updated_at,
-// preserving operator-controlled source and enabled. Manual upserts claim the
-// row: they additionally take over source and enabled so an operator add
-// always yields the requested state, even when the row was previously
-// inserted disabled by discovery (e.g. via RecordError). Cursor and sig
-// policy are preserved in both cases. A successful upsert clears last_error:
-// the row resolved cleanly, so any prior discovery error is stale.
-//
-// id is minted at first insert only (MAX+1 over the table); created_at is set
-// at first insert only and never updated. The ON CONFLICT branches never list
-// either (nor declared_at), so re-upserts keep the original values and the
-// identifier stays monotonic and never reused. SQLite serializes writers
-// (single process, busy_timeout), so concurrent first-inserts stay monotonic.
+// upsertLabelerTx shares the caller's transaction so declaration changes and events can commit together.
 func upsertLabelerTx(ctx context.Context, tx *sql.Tx, labeler Labeler) error {
 	var requireSig interface{} = nil
 	if labeler.RequireSig != nil {
@@ -99,6 +71,11 @@ func upsertLabelerTx(ctx context.Context, tx *sql.Tx, labeler Labeler) error {
 		lastError = labeler.LastError
 	}
 
+	// Firehose conflicts preserve source and enabled. Manual conflicts replace both.
+	// Both preserve cursor, require_sig, id, created_at, and declared_at.
+	// A successful upsert clears last_error because the discovery error is stale.
+	// Mint id as MAX(id)+1 and set created_at only at first insert.
+	// SQLite serializes writers. Labeler rows are never deleted, so IDs cannot be reused.
 	query := `
 		INSERT INTO labelers(did, endpoint, source, enabled, require_sig, last_upstream_seq, last_error, id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(id), 0) + 1 FROM labelers), ?, ?)
@@ -252,9 +229,7 @@ func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 	return labelers, nil
 }
 
-// testBetweenSnapshotReads, when non-nil, runs between the labeler and
-// declaration queries of the snapshot read methods. Test-only seam for
-// pinning single-snapshot semantics; nil outside tests.
+// testBetweenSnapshotReads lets tests commit a concurrent write between snapshot queries. It must be nil outside tests.
 var testBetweenSnapshotReads func()
 
 // ListWithDeclarations returns the id-ordered labelers and their declarations
@@ -472,17 +447,9 @@ func (r *LabelerRegistry) WriteCursor(ctx context.Context, did string, seq int64
 	return nil
 }
 
-// RecordError records or updates an error message for a labeler.
-// For fresh labelers (not yet in the registry), inserts a minimal row with source='firehose', enabled=0,
-// minting the next id like any first insert (and setting created_at).
-// For existing labelers, updates only last_error and updated_at, preserving source and enabled
-// (and the existing id, created_at, and declared_at, which the ON CONFLICT branch never lists).
-// This ensures manual labelers remain sticky even when discovery encounters errors.
-//
-// RecordError never tracks a declaration: rows created here carry no
-// labeler_declarations row and NULL declared_at, so their declarations view is
-// empty and their first successful declaration is still a zero-to-one
-// transition that can re-enable them.
+// RecordError inserts unknown DIDs as disabled firehose rows, minting id and setting created_at once.
+// ON CONFLICT changes only last_error and updated_at, preserving operator state, identity, and declaration timestamps.
+// New rows have no declaration and NULL declared_at, so the first successful declaration can re-enable them.
 func (r *LabelerRegistry) RecordError(ctx context.Context, did, msg string) error {
 	query := `
 		INSERT INTO labelers(did, endpoint, last_error, source, enabled, id, created_at, updated_at)

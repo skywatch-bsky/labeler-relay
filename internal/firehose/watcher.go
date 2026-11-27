@@ -184,23 +184,13 @@ func (w *FirehoseWatcher) handleEvent(ctx context.Context, evt *stream.XRPCStrea
 	return cb.EventHandler(ctx, evt)
 }
 
-// handleCommit processes a commit event from the firehose.
-//
-// Every declaration op routes through the store's atomic
-// LabelPersist.ApplyServiceOp, which applies the registry transition (upsert,
-// declaration tracking, enable/disable) and the #service event in one
-// transaction.
-//
-// Error contract: an ApplyServiceOp failure — context cancellation, SQLite
-// failure, frame-encode failure, anything — breaks out of the op loop
-// immediately and handleCommit returns the error WITHOUT staging the commit,
-// so the firehose cursor stays before this commit and the redial replays it.
-// (A non-cancellation store failure would otherwise advance the cursor past a
-// rolled-back op and lose it forever; breaking at the first failure also
-// prevents later ops in the same commit from applying and then duplicating
-// events on replay.) Resolver/RecordError failures keep their separate
-// best-effort, non-fatal policy: they record the error in the registry and
-// continue, tracking no declaration and emitting no event.
+// handleCommit applies each declaration through ApplyServiceOp, which commits
+// the registry transition and #service event in one transaction.
+// Any ApplyServiceOp failure returns immediately without staging the cursor,
+// so redial replays the incomplete commit. Stopping at the first failure
+// prevents later ops from applying and duplicating events on replay.
+// The store deduplicates by commit sequence, DID, collection, rkey, and action.
+// Replayed ops emit no second event or reconcile poke.
 func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) error {
 	ops, skipped, err := ExtractLabelerDeclarationOps(ctx, commit)
 	for _, item := range skipped {
@@ -215,10 +205,8 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 		return nil
 	}
 
-	// interrupted is set when cancellation cut this commit short during
-	// endpoint resolution: the resolver call failed because the context
-	// ended, so the op and every op after it were neither registered nor
-	// recorded as an error.
+	// Resolver cancellation must prevent cursor staging even when the loop
+	// reaches its end without an ApplyServiceOp failure.
 	var interrupted error
 
 	for _, op := range ops {
@@ -228,6 +216,8 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 		if op.Action == "create" || op.Action == "update" {
 			endpoint, err := w.resolver.LabelerEndpoint(ctx, op.RepoDID)
 			if err != nil {
+				// Resolver errors and RecordError writes are best-effort, unlike
+				// ApplyServiceOp failures. Track no declaration and emit no event.
 				if errors.Is(err, ErrNoLabelerEndpoint) {
 					w.log.Debug("no labeler endpoint", "did", op.RepoDID)
 					// Record the error in the registry and continue.
@@ -278,8 +268,7 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				return err
 			}
 			if res.Skipped {
-				// The relay never registered this declaration (e.g. the row
-				// predates multi-collection tracking): nothing to do.
+				// Skipped includes both untracked declarations and replayed deletes.
 				w.log.Debug("delete of untracked declaration", "did", op.RepoDID, "collection", op.Collection)
 			} else if res.EnabledChanged {
 				// A disable needs a slurper reconcile; the delete event alone

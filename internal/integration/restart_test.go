@@ -8,14 +8,8 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-// TestIDAndCreatedAtSurviveRestart exercises the close/reopen boundary:
-// id values survive a full Store close and reopen (Store.Open
-// re-runs the idempotent migration, which must not re-mint), the reopened
-// list still arrives in observed order, and a labeler registered after
-// reopening mints a sequence above the previous maximum. Unlike
-// TestResumeSlurper, which reuses a still-open store, every database user is
-// shut down before the close here — persist and registry run no background
-// goroutines in this test, so closing the Store is the shutdown.
+// Reopening reruns migrations, which must preserve IDs and their allocation order.
+// Unlike TestResumeSlurper, this test closes the database. Its users have no background goroutines.
 func TestIDAndCreatedAtSurviveRestart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

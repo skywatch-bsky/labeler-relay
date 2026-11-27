@@ -471,11 +471,7 @@ func TestRegistry(t *testing.T) {
 	})
 }
 
-// TestUpsertMintsMonotonicID verifies AC.1: first inserts mint
-// id 1, 2, 3 in insertion order (the DIDs here are deliberately out
-// of lexical order, so this cannot pass on DID order); re-upserting an
-// existing labeler through both the firehose and the manual path leaves its
-// original id untouched.
+// DIDs are out of lexical order so DID sorting cannot imitate first-observed ordering.
 func TestUpsertMintsMonotonicID(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -561,9 +557,6 @@ func TestUpsertMintsMonotonicID(t *testing.T) {
 	}
 }
 
-// TestRecordErrorMintsID verifies AC.1 for the discovery-error path:
-// RecordError on a fresh DID mints the next id like any first
-// insert; RecordError again on the same DID leaves it unchanged.
 func TestRecordErrorMintsID(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -575,7 +568,6 @@ func TestRecordErrorMintsID(t *testing.T) {
 
 	reg := store.NewLabelerRegistry(s)
 
-	// Two regular inserts first: id 1 and 2.
 	for i, did := range []string{"did:plc:one", "did:plc:two"} {
 		if err := reg.Upsert(ctx, store.Labeler{
 			DID:       did,
@@ -632,7 +624,6 @@ func TestRecordErrorMintsID(t *testing.T) {
 	}
 }
 
-// requireDeclaredAt asserts the labeler's declared_at equals want.
 func requireDeclaredAt(t *testing.T, reg *store.LabelerRegistry, ctx context.Context, did string, want int64) {
 	t.Helper()
 	got, _, err := reg.Get(ctx, did)
@@ -647,10 +638,6 @@ func requireDeclaredAt(t *testing.T, reg *store.LabelerRegistry, ctx context.Con
 	}
 }
 
-// TestCreatedAtSetOnceAndPreserved verifies AC.3: created_at is set once at
-// first insert and never updated — re-upserts through both stickiness paths,
-// RecordError, cursor writes, SetEnabled, SetRequireSig, and even
-// ApplyServiceOp (the only declared_at writer) all preserve it.
 func TestCreatedAtSetOnceAndPreserved(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "created.db"))
@@ -721,13 +708,7 @@ func TestCreatedAtSetOnceAndPreserved(t *testing.T) {
 	unchanged("ApplyServiceOp")
 }
 
-// TestDeclaredAtOnlyMovesOnDeclarationOps verifies AC.3: declared_at is
-// written only by ApplyServiceOp and advances on every applied declaration
-// op (create, update, tracked delete), while admin upserts, RecordError,
-// cursor writes, SetEnabled, and SetRequireSig never touch it.
-//
-// The sentinel dance (forcing declared_at to 1000 between phases) makes
-// "advanced" strict even when two ops land in the same wall-clock second.
+// Reset declared_at to 1000 between phases so operations in the same second must still show a timestamp change.
 func TestDeclaredAtOnlyMovesOnDeclarationOps(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "declared.db"))
@@ -745,8 +726,6 @@ func TestDeclaredAtOnlyMovesOnDeclarationOps(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// No declaration observed yet: every writer class leaves declared_at
-	// NULL.
 	assertNull := func(step string) {
 		t.Helper()
 		got, _, err := reg.Get(ctx, did)
@@ -782,7 +761,6 @@ func TestDeclaredAtOnlyMovesOnDeclarationOps(t *testing.T) {
 	}
 	assertNull("SetRequireSig")
 
-	// The first applied declaration op sets it.
 	if _, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op: "create", DID: did, Collection: "app.bsky.labeler.service",
 		Record: []byte{0xa1, 0x61, 'a', 0x01}, Endpoint: "four.example.com", AutoSubscribe: true,
@@ -797,7 +775,6 @@ func TestDeclaredAtOnlyMovesOnDeclarationOps(t *testing.T) {
 		t.Fatalf("create must set declared_at, got %v", got.DeclaredAt)
 	}
 
-	// Sentinel: prove the non-declaration writers hold the value still.
 	setSentinel := func() {
 		if _, err := s.DB().Exec(`UPDATE labelers SET declared_at = 1000 WHERE did = ?`, did); err != nil {
 			t.Fatalf("sentinel update: %v", err)
@@ -826,7 +803,6 @@ func TestDeclaredAtOnlyMovesOnDeclarationOps(t *testing.T) {
 	}
 	requireDeclaredAt(t, reg, ctx, did, 1000)
 
-	// Every applied declaration op advances it from the sentinel.
 	if _, err := persist.ApplyServiceOp(ctx, store.ServiceOp{
 		Op: "update", DID: did, Collection: "app.bsky.labeler.service",
 		Record: []byte{0xa1, 0x61, 'b', 0x02}, Endpoint: "five.example.com", AutoSubscribe: true,

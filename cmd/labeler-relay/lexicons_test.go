@@ -1,7 +1,4 @@
 // pattern: Imperative Shell
-// Lexicon shape guard for issues #41/#42: the labelerView field set (id,
-// createdAt, optional updatedAt, no source), the id-keyed cursor docs, and
-// the #service message's unknown-typed record plus non-required collection.
 
 package main
 
@@ -25,7 +22,6 @@ type schemaNode struct {
 	KnownValues []string              `json:"knownValues"`
 }
 
-// readDefs parses a lexicon document and returns its defs map.
 func readDefs(t *testing.T, path string) map[string]json.RawMessage {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -41,29 +37,21 @@ func readDefs(t *testing.T, path string) map[string]json.RawMessage {
 	return top.Defs
 }
 
-// TestLabelerViewLexiconShape verifies AC.1: defs.json's labelerView carries
-// exactly the issue #41 field set plus declarations (with updatedAt optional),
-// getLabelers' cursor descriptions reference id, and subscribeLabelers' #service
-// record is unknown-typed with a non-required collection carrying the three
-// declaration NSIDs as knownValues.
+// Keep the published lexicons consistent with query responses and stored service frames.
 func TestLabelerViewLexiconShape(t *testing.T) {
-	// --- defs.json: labelerView ---
 	defs := readDefs(t, "../../lexicons/community/labeler/sync/defs.json")
 	var view schemaNode
 	require.NoError(t, json.Unmarshal(defs["labelerView"], &view))
 	require.Equal(t, "object", view.Type)
 
-	// Required: the issue #41 set plus declarations — and no source.
 	require.ElementsMatch(t,
 		[]string{"id", "did", "createdAt", "endpoint", "enabled", "last_upstream_seq", "declarations"},
 		view.Required, "labelerView required fields")
 	require.NotContains(t, view.Required, "source", "source was removed from labelerView")
 	require.NotContains(t, view.Required, "updatedAt", "updatedAt must stay optional")
 
-	// Only last_upstream_seq is nullable.
 	require.ElementsMatch(t, []string{"last_upstream_seq"}, view.Nullable)
 
-	// Properties: the required set plus the optional updatedAt.
 	for _, key := range []string{
 		"id", "did", "createdAt", "updatedAt", "endpoint", "enabled", "last_upstream_seq", "declarations",
 	} {
@@ -72,7 +60,6 @@ func TestLabelerViewLexiconShape(t *testing.T) {
 	}
 	require.NotContains(t, view.Properties, "source")
 
-	// Field types and the enabled description from issue #41.
 	require.Equal(t, "integer", view.Properties["id"].Type)
 	require.Equal(t, "string", view.Properties["did"].Type)
 	require.Equal(t, "string", view.Properties["createdAt"].Type)
@@ -84,7 +71,6 @@ func TestLabelerViewLexiconShape(t *testing.T) {
 	require.Contains(t, view.Properties["enabled"].Description, "inactive",
 		"the enabled description must carry issue #41's inactive-on-removal wording")
 
-	// declarations items: the three declaration NSIDs as knownValues.
 	items := view.Properties["declarations"].Items
 	require.NotNil(t, items)
 	require.Equal(t, "string", items.Type)
@@ -92,7 +78,6 @@ func TestLabelerViewLexiconShape(t *testing.T) {
 		"app.bsky.labeler.service", "town.delve.labeler.service", "so.sprk.labeler.service",
 	}, items.KnownValues, "declarations items knownValues must list the three declaration NSIDs")
 
-	// --- getLabelers.json: cursor docs reference id ---
 	glDefs := readDefs(t, "../../lexicons/community/labeler/sync/getLabelers.json")
 	var glMain struct {
 		Parameters *struct {
@@ -115,13 +100,12 @@ func TestLabelerViewLexiconShape(t *testing.T) {
 	require.Contains(t, respCursor.Description, "The id of the last labeler",
 		"the response cursor description must reference id")
 
-	// --- subscribeLabelers.json: #service record + collection ---
 	slDefs := readDefs(t, "../../lexicons/community/labeler/sync/subscribeLabelers.json")
 	var service schemaNode
 	require.NoError(t, json.Unmarshal(slDefs["service"], &service))
 	require.Equal(t, "object", service.Type)
 
-	// collection: non-required, with the three NSID knownValues.
+	// Stored legacy frames have no collection field.
 	require.NotContains(t, service.Required, "collection",
 		"collection must stay non-required so pre-change stored frames remain valid")
 	collection := service.Properties["collection"]
@@ -130,12 +114,10 @@ func TestLabelerViewLexiconShape(t *testing.T) {
 		"app.bsky.labeler.service", "town.delve.labeler.service", "so.sprk.labeler.service",
 	}, collection.KnownValues)
 
-	// record: unknown-typed passthrough, not a ref.
 	record := service.Properties["record"]
 	require.Equal(t, "unknown", record.Type,
 		"the record property must be unknown-typed (byte-faithful CBOR passthrough)")
 	require.Empty(t, record.Refs, "the record property must not ref app.bsky.labeler.service")
 
-	// The required set stays seq/src/op.
 	require.ElementsMatch(t, []string{"seq", "src", "op"}, service.Required)
 }
