@@ -11,7 +11,10 @@ import (
 
 // ServiceOp describes a single labeler service declaration operation observed
 // on the firehose, applied atomically with its #service event by
-// LabelPersist.ApplyServiceOp.
+// LabelPersist.ApplyServiceOp. Its replay identity is stored in
+// applied_service_ops independently of event pruning, including for skipped
+// ops; events.dedup_key is a redundant event-side record. CommitSeq 0 disables
+// replay dedup for direct/test callers.
 type ServiceOp struct {
 	Op            string // "create" | "update" | "delete"
 	DID           string
@@ -19,7 +22,7 @@ type ServiceOp struct {
 	Record        []byte // raw DAG-CBOR record bytes; nil for delete
 	Endpoint      string // resolved upstream endpoint; create/update only
 	AutoSubscribe bool   // whether the zero-to-one re-enable may fire
-	CommitSeq     int64  // upstream firehose commit sequence
+	CommitSeq     int64  // upstream firehose commit sequence; 0 disables replay dedup (for direct/test callers) — the watcher always sets it from the commit event
 	Rkey          string // upstream record key
 }
 
@@ -27,8 +30,9 @@ type ServiceOp struct {
 type ServiceOpResult struct {
 	// Seq is the relay seq of the persisted #service event (0 when Skipped).
 	Seq int64
-	// Skipped reports a delete op for a declaration this relay never
-	// registered: nothing was written — no event, no registry change.
+	// Skipped reports an op that was already seen or a delete for an
+	// untracked declaration: no event or registry change was written, but
+	// replay identity may have been committed.
 	Skipped bool
 	// EnabledChanged reports whether the op flipped the labeler's enabled
 	// state (auto-disable on last-declaration removal, or re-enable on the
@@ -63,10 +67,15 @@ type serviceOpWrites struct {
 //     and enabled. Manual rows are never auto-disabled or auto-enabled.
 //
 // On any error the whole transaction rolls back: no registry mutation, no
-// event row, no seq consumed, no declared_at change. Skipped also covers an
-// already-applied upstream op replay, giving exactly-once application across
-// redials and process restarts.
+// event row, no seq consumed, no declared_at change. Exactly-once identity is
+// stored in applied_service_ops independently of event pruning, including for
+// skipped ops; events.dedup_key is a redundant event-side record. CommitSeq 0
+// disables replay dedup for direct/test callers.
 func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res ServiceOpResult, err error) {
+	if op.Op != "delete" && len(op.Record) == 0 {
+		return res, fmt.Errorf("create/update service op requires record bytes")
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -82,13 +91,12 @@ func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res Se
 	if err != nil {
 		return res, err
 	}
-	if w.skipped {
-		// No writes at all: the relay never registered this declaration.
-		return ServiceOpResult{Skipped: true}, nil
-	}
 
 	if err := tx.Commit(); err != nil {
 		return res, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	if w.skipped {
+		return ServiceOpResult{Skipped: true}, nil
 	}
 
 	// Broadcast and head-seq callback still holding mu, matching the
@@ -112,14 +120,24 @@ func (p *LabelPersist) ApplyServiceOp(ctx context.Context, op ServiceOp) (res Se
 // persistence for one op inside tx.
 func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op ServiceOp, now int64) (w serviceOpWrites, err error) {
 	dedupKey := fmt.Sprintf("svc:%d/%s/%s/%s/%s", op.CommitSeq, op.DID, op.Collection, op.Rkey, op.Op)
-	var existing int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM events WHERE dedup_key = ? LIMIT 1`, dedupKey).Scan(&existing)
-	if err == nil {
-		w.skipped = true
-		return w, nil
+	if op.CommitSeq == 0 {
+		dedupKey = ""
 	}
-	if err != sql.ErrNoRows {
-		return w, fmt.Errorf("failed to check service op replay: %w", err)
+	if dedupKey != "" {
+		result, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO applied_service_ops(dedup_key, applied_ts) VALUES (?, ?)`,
+			dedupKey, now)
+		if err != nil {
+			return w, fmt.Errorf("failed to record service op identity: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return w, fmt.Errorf("failed to check service op identity: %w", err)
+		}
+		if affected == 0 {
+			w.skipped = true
+			return w, nil
+		}
 	}
 
 	switch op.Op {
@@ -232,11 +250,15 @@ func (p *LabelPersist) applyServiceOpTx(ctx context.Context, tx *sql.Tx, op Serv
 // relay_seq), encodes the #service frame, and stores it.
 func persistServiceEventTx(ctx context.Context, tx *sql.Tx, op ServiceOp, dedupKey string) (seq int64, frame []byte, err error) {
 	ingestTs := timestampMs()
+	var eventDedupKey interface{}
+	if dedupKey != "" {
+		eventDedupKey = dedupKey
+	}
 	if err := tx.QueryRowContext(ctx,
 		`INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts, dedup_key)
 		 VALUES ('service', ?, NULL, x'', ?, ?)
 		 RETURNING relay_seq`,
-		op.DID, ingestTs, dedupKey).Scan(&seq); err != nil {
+		op.DID, ingestTs, eventDedupKey).Scan(&seq); err != nil {
 		return 0, nil, fmt.Errorf("failed to insert placeholder: %w", err)
 	}
 

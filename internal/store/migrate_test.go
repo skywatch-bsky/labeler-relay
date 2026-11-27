@@ -701,3 +701,91 @@ func TestMigrateRollsBackOnFailure(t *testing.T) {
 		t.Error("expected idx_labelers_id to exist after retry")
 	}
 }
+
+// TestMigrateAddsEventDedupAndAppliedOps covers the events-dedup migration
+// on an old-shape database — the upgrade path every existing deployment
+// takes on first boot with this change: an events table predating the
+// dedup_key column gains the column and its unique index, the durable
+// applied_service_ops identity table is created, existing rows survive with
+// NULL keys, and a reopen is a no-op.
+func TestMigrateAddsEventDedupAndAppliedOps(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old-events.db")
+
+	// The events table exactly as commit bd398f1 shaped it: no dedup_key.
+	// The labelers table is absent so schema.sql creates the fresh shape
+	// (the identity state machine then takes its id-only no-op branch).
+	const oldEventsDDL = `
+CREATE TABLE events (
+    relay_seq    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT    NOT NULL,
+    labeler_did  TEXT    NOT NULL,
+    upstream_seq INTEGER,
+    frame_cbor   BLOB    NOT NULL,
+    ingest_ts    INTEGER NOT NULL
+);`
+	const oldEventsRows = `INSERT INTO events(kind, labeler_did, upstream_seq, frame_cbor, ingest_ts) VALUES
+	('labels', 'did:plc:old-labeler', 5, x'01', 1000),
+	('service', 'did:plc:old-labeler', NULL, x'02', 2000)`
+	createShapeDB(t, dbPath, oldEventsDDL, oldEventsRows)
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open on old-shape events database: %v", err)
+	}
+
+	if !rawColumnExists(t, dbPath, "events", "dedup_key") {
+		t.Error("expected events.dedup_key to be added by migration")
+	}
+	if !rawIndexExists(t, dbPath, "idx_events_dedup") {
+		t.Error("expected idx_events_dedup to exist after migration")
+	}
+	if !rawTableExists(t, dbPath, "applied_service_ops") {
+		t.Error("expected applied_service_ops to exist after migration")
+	}
+
+	// The pre-existing rows survive untouched, with NULL dedup keys.
+	var rows, nullKeys int
+	if err := s.DB().QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE dedup_key IS NULL) FROM events`).Scan(&rows, &nullKeys); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if rows != 2 || nullKeys != 2 {
+		t.Fatalf("expected 2 surviving rows with NULL dedup keys, got rows=%d nulls=%d", rows, nullKeys)
+	}
+
+	// A service op applied after the migration records its durable identity
+	// and its event-side key, and survives a reopen.
+	if _, err := store.NewLabelPersist(s).ApplyServiceOp(context.Background(), store.ServiceOp{
+		Op: "create", DID: "did:plc:dedup-mig", Collection: "app.bsky.labeler.service", Rkey: "self",
+		Record: []byte{0xa1, 0x61, 'a', 0x01}, Endpoint: "mig.example.com", AutoSubscribe: true,
+		CommitSeq: 42,
+	}); err != nil {
+		t.Fatalf("post-migration ApplyServiceOp: %v", err)
+	}
+	var identity string
+	if err := s.DB().QueryRow(`SELECT dedup_key FROM applied_service_ops WHERE dedup_key LIKE 'svc:42/%'`).Scan(&identity); err != nil {
+		t.Fatalf("read applied identity: %v", err)
+	}
+	wantKey := "svc:42/did:plc:dedup-mig/app.bsky.labeler.service/self/create"
+	if identity != wantKey {
+		t.Fatalf("applied identity = %q, want %q", identity, wantKey)
+	}
+	s.Close()
+
+	// Reopen is a no-op: the column, index, and table are still there and
+	// the identity row survived.
+	s2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	if !rawColumnExists(t, dbPath, "events", "dedup_key") || !rawIndexExists(t, dbPath, "idx_events_dedup") || !rawTableExists(t, dbPath, "applied_service_ops") {
+		t.Fatal("expected dedup schema to survive a reopen")
+	}
+	var surviving int
+	if err := s2.DB().QueryRow(`SELECT COUNT(*) FROM applied_service_ops`).Scan(&surviving); err != nil {
+		t.Fatalf("count applied ops: %v", err)
+	}
+	if surviving != 1 {
+		t.Fatalf("expected the applied identity to survive the reopen, got %d rows", surviving)
+	}
+}

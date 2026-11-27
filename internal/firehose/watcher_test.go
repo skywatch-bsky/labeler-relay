@@ -943,6 +943,41 @@ func TestWatcherMalformedRecordSkipsOnlyThatOp(t *testing.T) {
 	}
 }
 
+// TestWatcherStructuralSkipKeepsValidSibling pins the watcher-level
+// granularity of structural failures: a create op with a missing CID is
+// skipped (logged at Warn), its valid sibling in the same commit registers
+// and emits its event, and the commit counts as processed.
+func TestWatcherStructuralSkipKeepsValidSibling(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:structural-sibling"
+	const endpoint = "labeler.example.com"
+
+	w, s, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
+	w.SetCursorFlushThresholds(1_000_000, time.Hour)
+	w.lastFlushTime = time.Now()
+	ctx := context.Background()
+
+	commit := multiDeclarationCommit(t, did, 1, []declarationRecordSpec{
+		{Collection: "app.bsky.labeler.service", Rkey: "self", Record: mustMarshalCBOR(t, sampleService("2026-06-01T00:00:00Z"))},
+		{Collection: "town.delve.labeler.service", Rkey: "self", Record: mustMarshalCBOR(t, sampleService("2026-06-02T00:00:00Z"))},
+	})
+	commit.Ops[0].Cid = nil // structurally broken: no CID
+
+	if err := w.handleCommit(ctx, commit); err != nil {
+		t.Fatalf("a per-op structural failure must not fail the commit: %v", err)
+	}
+	if n := countServiceEvents(t, s, did); n != 1 {
+		t.Fatalf("only the valid sibling's event may exist, got %d", n)
+	}
+	if got := declarationsFor(t, w, did); len(got) != 1 || got[0] != "town.delve.labeler.service" {
+		t.Fatalf("only the valid sibling's declaration may be tracked, got %v", got)
+	}
+	if w.pendingSeq == nil || *w.pendingSeq != 1 {
+		t.Fatalf("the commit must count as processed: pending=%v, want 1", w.pendingSeq)
+	}
+}
+
 // TestWatcherNonSelfDeleteDoesNotDisable pins the self-keyed declaration
 // contract: a delete at a record key other than "self" is not a declaration
 // op (all three declaration schemas are literal:self), so it must not remove

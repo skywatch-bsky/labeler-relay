@@ -143,6 +143,13 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
+	// Durable service-op identity is independent of prunable event rows.
+	if err := execInTx(db, "applied service ops", []string{
+		`CREATE TABLE IF NOT EXISTS applied_service_ops (dedup_key TEXT PRIMARY KEY, applied_ts INTEGER NOT NULL)`,
+	}); err != nil {
+		return err
+	}
+
 	// Unconditional belt-and-braces: fresh databases reach this without any
 	// identity mutation above, so the index must be created here for them
 	// too, and any surviving legacy index must go.

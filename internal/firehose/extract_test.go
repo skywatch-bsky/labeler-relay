@@ -3,6 +3,7 @@ package firehose
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"testing"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
@@ -11,6 +12,8 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multihash"
 	"github.com/stretchr/testify/require"
+
+	"github.com/scarndp/labeler-relay/internal/dagcbor"
 )
 
 // TestExtractLabelerDeclarationOpsFilters tests that only declaration
@@ -222,6 +225,89 @@ func TestExtractRejectsMalformedRecord(t *testing.T) {
 	require.Equal(t, "app.bsky.labeler.service/self", skipped[0].Path)
 	require.Error(t, skipped[0].Err)
 	require.Contains(t, skipped[0].Err.Error(), "invalid declaration record")
+}
+
+// TestExtractSkipsStructurallyBrokenOps pins the per-op granularity of
+// structural failures: a create/update op with a missing CID, an op
+// referencing a block absent from the CAR, or a record over the decode
+// budget skips only that op — the valid sibling in the same commit is
+// still extracted and extraction does not error. Only a CAR that fails to
+// load is a hard error.
+func TestExtractSkipsStructurallyBrokenOps(t *testing.T) {
+	t.Parallel()
+
+	const did = "did:plc:extract-structural"
+	const brokenCollection = "app.bsky.labeler.service"
+	const validCollection = "town.delve.labeler.service"
+	validRecord := mustMarshalCBOR(t, sampleService("2026-06-01T00:00:00Z"))
+	// Arbitrary bytes for the broken op's record: never fetched in the
+	// missing-CID and unknown-block cases.
+	dummyRecord := []byte{0xa1, 0x61, 'a', 0x01}
+
+	// An oversize but well-formed record: a map holding one byte string
+	// larger than the ScanOne decode budget.
+	oversize := make([]byte, 0, dagcbor.MaxScanBytes+32)
+	oversize = append(oversize, 0xa1, 0x64, 'd', 'a', 't', 'a', 0x5b)
+	var lenBuf [8]byte
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(dagcbor.MaxScanBytes))
+	oversize = append(oversize, lenBuf[:]...)
+	oversize = append(oversize, make([]byte, dagcbor.MaxScanBytes)...)
+
+	build := func(brokenRecord []byte) *comatproto.SyncSubscribeRepos_Commit {
+		t.Helper()
+		built := buildMultiDeclarationCAR(t, did, []declarationRecordSpec{
+			{Collection: brokenCollection, Rkey: "self", Record: brokenRecord},
+			{Collection: validCollection, Rkey: "self", Record: validRecord},
+		})
+		brokenLex := util.LexLink(built.RecordCIDs[0])
+		validLex := util.LexLink(built.RecordCIDs[1])
+		return &comatproto.SyncSubscribeRepos_Commit{
+			Repo:   did,
+			Blocks: built.CAR,
+			Seq:    1,
+			Rev:    built.Rev,
+			Commit: util.LexLink(built.CommitCID),
+			Ops: []*comatproto.SyncSubscribeRepos_RepoOp{
+				{Action: "create", Path: brokenCollection + "/self", Cid: &brokenLex},
+				{Action: "create", Path: validCollection + "/self", Cid: &validLex},
+			},
+		}
+	}
+
+	t.Run("missing CID", func(t *testing.T) {
+		commit := build(dummyRecord)
+		commit.Ops[0].Cid = nil
+		ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+		require.NoError(t, err, "a per-op structural failure must not error extraction")
+		require.Len(t, ops, 1, "the valid sibling must still be extracted")
+		require.Equal(t, validCollection, ops[0].Collection)
+		require.Len(t, skipped, 1)
+		require.Equal(t, brokenCollection+"/self", skipped[0].Path)
+		require.Contains(t, skipped[0].Err.Error(), "missing CID")
+	})
+
+	t.Run("unknown block CID", func(t *testing.T) {
+		commit := build(dummyRecord)
+		commit.Ops[0].Cid = testCID("block-not-in-car")
+		ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+		require.NoError(t, err, "a per-op structural failure must not error extraction")
+		require.Len(t, ops, 1, "the valid sibling must still be extracted")
+		require.Equal(t, validCollection, ops[0].Collection)
+		require.Len(t, skipped, 1)
+		require.Equal(t, brokenCollection+"/self", skipped[0].Path)
+		require.Contains(t, skipped[0].Err.Error(), "failed to get block")
+	})
+
+	t.Run("record over decode budget", func(t *testing.T) {
+		commit := build(oversize)
+		ops, skipped, err := ExtractLabelerDeclarationOps(context.Background(), commit)
+		require.NoError(t, err, "a per-op structural failure must not error extraction")
+		require.Len(t, ops, 1, "the valid sibling must still be extracted")
+		require.Equal(t, validCollection, ops[0].Collection)
+		require.Len(t, skipped, 1)
+		require.Equal(t, brokenCollection+"/self", skipped[0].Path)
+		require.Contains(t, skipped[0].Err.Error(), "decode budget")
+	})
 }
 
 // mustMarshalCBOR marshals a record to CBOR bytes for byte-equality checks.

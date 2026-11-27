@@ -36,8 +36,9 @@ type LabelerDeclarationOp struct {
 	Record     []byte // raw DAG-CBOR record block bytes; nil for delete
 }
 
-// SkippedDeclaration reports a declaration record skipped because its CBOR is
-// malformed. Structural CAR or block lookup failures remain hard errors.
+// SkippedDeclaration reports a declaration op skipped because its record is
+// malformed or over the decode budget, or because its CID or block is missing.
+// CAR load failures remain hard errors.
 type SkippedDeclaration struct {
 	Path string
 	Err  error
@@ -50,9 +51,9 @@ type SkippedDeclaration struct {
 //
 // Records are kept as raw block bytes (no typed unmarshal) — the relay passes
 // them through byte-faithfully. Each create/update record is validated as one
-// complete, well-formed DAG-CBOR map with no trailing bytes; malformed records
-// are returned in skipped while valid siblings are still extracted. CAR load,
-// missing-CID, and block-fetch failures remain hard errors.
+// complete, well-formed DAG-CBOR map with no trailing bytes. Malformed or
+// oversized records, missing CIDs, and missing blocks are returned in skipped
+// while valid siblings are still extracted. CAR load failures remain hard errors.
 //
 // Allocation-light: returns early when no self-keyed declaration ops are present.
 func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) ([]LabelerDeclarationOp, []SkippedDeclaration, error) {
@@ -98,17 +99,23 @@ func ExtractLabelerDeclarationOps(ctx context.Context, commit *comatproto.SyncSu
 
 		if op.Action == "create" || op.Action == "update" {
 			if op.Cid == nil {
-				return nil, nil, fmt.Errorf("create/update op missing CID for %s", op.Path)
+				skipped = append(skipped, SkippedDeclaration{Path: op.Path, Err: fmt.Errorf("create/update op missing CID")})
+				continue
 			}
 
 			// LexLink is a cid.Cid value, we need to cast it.
 			cidVal := cid.Cid(*op.Cid)
 			block, err := repoObj.RecordStore.Get(ctx, cidVal)
 			if err != nil {
-				return nil, nil, fmt.Errorf("failed to get block for %s: %w", op.Path, err)
+				skipped = append(skipped, SkippedDeclaration{Path: op.Path, Err: fmt.Errorf("failed to get block: %w", err)})
+				continue
 			}
 
 			record = block.RawData()
+			if len(record) > dagcbor.MaxScanBytes {
+				skipped = append(skipped, SkippedDeclaration{Path: op.Path, Err: fmt.Errorf("declaration record exceeds %d byte decode budget", dagcbor.MaxScanBytes)})
+				continue
+			}
 			if err := dagcbor.ValidateMap(record); err != nil {
 				skipped = append(skipped, SkippedDeclaration{Path: op.Path, Err: fmt.Errorf("invalid declaration record: %w", err)})
 				continue

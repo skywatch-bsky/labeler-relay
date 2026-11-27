@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_ingest_ts ON events (ingest_ts);
 
+CREATE TABLE IF NOT EXISTS applied_service_ops (
+    dedup_key  TEXT PRIMARY KEY, -- upstream declaration-op identity; survives event pruning
+    applied_ts INTEGER NOT NULL -- unix seconds, informational
+);
+
 CREATE TABLE IF NOT EXISTS labelers (
     did              TEXT PRIMARY KEY,
     endpoint         TEXT,

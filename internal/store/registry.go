@@ -252,6 +252,11 @@ func (r *LabelerRegistry) List(ctx context.Context) ([]Labeler, error) {
 	return labelers, nil
 }
 
+// testBetweenSnapshotReads, when non-nil, runs between the labeler and
+// declaration queries of the snapshot read methods. Test-only seam for
+// pinning single-snapshot semantics; nil outside tests.
+var testBetweenSnapshotReads func()
+
 // ListWithDeclarations returns the id-ordered labelers and their declarations
 // from one SQLite read snapshot.
 func (r *LabelerRegistry) ListWithDeclarations(ctx context.Context) ([]Labeler, map[string][]string, error) {
@@ -279,6 +284,9 @@ func (r *LabelerRegistry) ListWithDeclarations(ctx context.Context) ([]Labeler, 
 	}
 	if err := rows.Close(); err != nil {
 		return nil, nil, fmt.Errorf("failed to close labelers: %w", err)
+	}
+	if testBetweenSnapshotReads != nil {
+		testBetweenSnapshotReads()
 	}
 	declRows, err := tx.QueryContext(ctx, `SELECT did, collection FROM labeler_declarations ORDER BY did ASC, collection ASC`)
 	if err != nil {
@@ -317,6 +325,9 @@ func (r *LabelerRegistry) GetWithDeclarations(ctx context.Context, did string) (
 	}
 	if err != nil {
 		return Labeler{}, nil, false, fmt.Errorf("failed to get labeler: %w", err)
+	}
+	if testBetweenSnapshotReads != nil {
+		testBetweenSnapshotReads()
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT collection FROM labeler_declarations WHERE did = ? ORDER BY collection ASC`, did)
 	if err != nil {

@@ -216,3 +216,97 @@ func TestApplyServiceOpDedupsReplay(t *testing.T) {
 	require.False(t, res.Skipped)
 	require.Equal(t, int64(2), res.Seq)
 }
+
+// TestApplyServiceOpRejectsEmptyRecord verifies the entry validation: a
+// create/update op without record bytes fails with a clear error before any
+// write, instead of an opaque frame-marshal failure mid-transaction.
+func TestApplyServiceOpRejectsEmptyRecord(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "empty.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	persist := store.NewLabelPersist(s)
+
+	_, err = persist.ApplyServiceOp(ctx, store.ServiceOp{
+		Op: "create", DID: "did:plc:empty", Collection: "app.bsky.labeler.service",
+		Record: nil, Endpoint: "empty.example.com",
+	})
+	require.ErrorContains(t, err, "requires record bytes")
+
+	head, err := persist.Head(ctx)
+	require.NoError(t, err)
+	require.Zero(t, head)
+}
+
+// TestApplyServiceOpRecordsSkippedDeleteIdentity verifies that an untracked
+// delete commits its replay identity even though nothing else is written:
+// replaying the same upstream delete is a dedup skip, so a stale replay can
+// never apply it against state that changed in between.
+func TestApplyServiceOpRecordsSkippedDeleteIdentity(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "skipid.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	reg := store.NewLabelerRegistry(s)
+	persist := store.NewLabelPersist(s)
+
+	const did = "did:plc:skipid"
+	deleteOp := store.ServiceOp{
+		Op: "delete", DID: did, Collection: "app.bsky.labeler.service", Rkey: "self", CommitSeq: 11,
+	}
+
+	// An untracked delete: skipped, but its identity must be recorded.
+	res, err := persist.ApplyServiceOp(ctx, deleteOp)
+	require.NoError(t, err)
+	require.True(t, res.Skipped)
+	require.Zero(t, res.Seq)
+
+	var ids int
+	require.NoError(t, s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM applied_service_ops`).Scan(&ids))
+	require.Equal(t, 1, ids, "the skipped delete must record its replay identity")
+
+	// Replaying the same upstream delete: dedup skip, still no event and no
+	// labeler row.
+	res, err = persist.ApplyServiceOp(ctx, deleteOp)
+	require.NoError(t, err)
+	require.True(t, res.Skipped)
+	head, err := persist.Head(ctx)
+	require.NoError(t, err)
+	require.Zero(t, head)
+
+	_, found, err := reg.Get(ctx, did)
+	require.NoError(t, err)
+	require.False(t, found, "an untracked delete must never register a labeler")
+}
+
+// TestApplyServiceOpCommitSeqZeroDisablesDedup verifies the zero-value
+// semantics: an op with CommitSeq 0 skips the identity gate, so repeated
+// direct calls apply repeatedly (the watcher always passes a real commit
+// sequence).
+func TestApplyServiceOpCommitSeqZeroDisablesDedup(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "zeroseq.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	persist := store.NewLabelPersist(s)
+
+	const did = "did:plc:zeroseq"
+	op := store.ServiceOp{
+		Op: "create", DID: did, Collection: "app.bsky.labeler.service", Rkey: "self",
+		Record: []byte{0xa1, 0x61, 'a', 0x01}, Endpoint: "zero.example.com", AutoSubscribe: true,
+	}
+
+	res, err := persist.ApplyServiceOp(ctx, op)
+	require.NoError(t, err)
+	require.False(t, res.Skipped)
+	require.Equal(t, int64(1), res.Seq)
+
+	res, err = persist.ApplyServiceOp(ctx, op)
+	require.NoError(t, err)
+	require.False(t, res.Skipped, "CommitSeq 0 must disable replay dedup")
+	require.Equal(t, int64(2), res.Seq)
+
+	var ids int
+	require.NoError(t, s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM applied_service_ops`).Scan(&ids))
+	require.Zero(t, ids, "no identity row is written for a zero CommitSeq op")
+}

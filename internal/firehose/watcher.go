@@ -4,6 +4,7 @@ package firehose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -203,11 +204,14 @@ func (w *FirehoseWatcher) handleEvent(ctx context.Context, evt *stream.XRPCStrea
 func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.SyncSubscribeRepos_Commit) error {
 	ops, skipped, err := ExtractLabelerDeclarationOps(ctx, commit)
 	for _, item := range skipped {
-		w.log.Warn("skipping malformed declaration record", "path", item.Path, "err", item.Err)
+		w.log.Warn("skipping declaration op", "path", item.Path, "err", item.Err)
 	}
 	if err != nil {
 		w.log.Error("extract failed", "err", err)
-		// Record the error but don't crash.
+		// A hard extraction error means the CAR could not be trusted. Count
+		// this commit as processed and deliberately drop its declaration ops;
+		// replaying the same corrupt bytes would loop forever.
+		w.maybeFlushCursor(ctx, commit.Seq)
 		return nil
 	}
 
@@ -224,7 +228,7 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 		if op.Action == "create" || op.Action == "update" {
 			endpoint, err := w.resolver.LabelerEndpoint(ctx, op.RepoDID)
 			if err != nil {
-				if err == ErrNoLabelerEndpoint {
+				if errors.Is(err, ErrNoLabelerEndpoint) {
 					w.log.Debug("no labeler endpoint", "did", op.RepoDID)
 					// Record the error in the registry and continue.
 					_ = w.registry.RecordError(ctx, op.RepoDID, "no atproto_labeler service endpoint")
