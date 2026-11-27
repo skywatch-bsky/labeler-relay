@@ -1,6 +1,6 @@
 # Admin
 
-Last verified: 2026-06-02
+Last verified: 2026-11-27
 
 ## Purpose
 Provides authenticated HTTP endpoints for manual labeler registry management. Allows operators to add, enable, disable, and list labelers independently of firehose auto-discovery.
@@ -8,6 +8,7 @@ Provides authenticated HTTP endpoints for manual labeler registry management. Al
 ## Contracts
 - **Exposes**: `API` (Routes), `RequireBearer` middleware
 - **Guarantees**:
+  - Labeler responses return the stored `endpoint` unchanged: only the host and optional port, or empty before resolution. They do not build a display URL.
   - All routes require Bearer token auth (constant-time comparison)
   - POST /admin/labelers resolves endpoint from DID before upserting with source="manual"; the manual upsert claims source/enabled even if the row was previously inserted disabled by discovery, and the 201 body echoes the persisted row
   - Enable/disable/delete trigger slurper reconcile via poke callback

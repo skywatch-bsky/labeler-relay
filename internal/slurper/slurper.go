@@ -4,6 +4,7 @@ package slurper
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -26,15 +27,16 @@ type subscriptionContext struct {
 
 // LabelSlurper manages the set of subscription goroutines, one per enabled labeler.
 type LabelSlurper struct {
+	dialTLS               *tls.Config
 	registry              *store.LabelerRegistry
 	persist               *store.LabelPersist
 	sigDefault            bool
 	limits                LimitConfig
 	log                   *slog.Logger
-	onUpstreamsReconciled func(float64)        // called after Reconcile with the new upstream count
-	onThrottled           func(string)         // called when a labeler is throttled, passed the labeler DID
-	onDropUnsigned        func(string)         // called when a label is dropped for missing signature, passed the labeler DID
-	onIngested            func(string, int)    // called after a successful PersistIngest with labeler DID and count
+	onUpstreamsReconciled func(float64)     // called after Reconcile with the new upstream count
+	onThrottled           func(string)      // called when a labeler is throttled, passed the labeler DID
+	onDropUnsigned        func(string)      // called when a label is dropped for missing signature, passed the labeler DID
+	onIngested            func(string, int) // called after a successful PersistIngest with labeler DID and count
 
 	pokeCh chan struct{} // capacity-1 signal; multiple Poke() calls collapse into one Reconcile
 	mu     sync.Mutex
@@ -115,6 +117,7 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 			}
 
 			sub := &subscription{
+				dialTLS:        s.dialTLS,
 				labeler:        labeler,
 				persist:        s.persist,
 				registry:       s.registry,
@@ -161,6 +164,12 @@ func (s *LabelSlurper) Reconcile(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// SetDialTLSConfig sets upstream TLS configuration before subscriptions start.
+// Production uses nil for the default certificate verification.
+func (sl *LabelSlurper) SetDialTLSConfig(cfg *tls.Config) {
+	sl.dialTLS = cfg
 }
 
 // SetUpstreamsCallback registers a function called after each Reconcile with

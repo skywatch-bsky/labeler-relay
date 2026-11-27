@@ -1,6 +1,6 @@
 # Slurper
 
-Last verified: 2026-06-02
+Last verified: 2026-11-27
 
 ## Purpose
 Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of active subscriptions against enabled labelers in the registry, handles redial with exponential backoff, rate limiting, and unsigned-label drop policy.
@@ -10,6 +10,8 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 - **Guarantees**:
   - One goroutine per enabled labeler; Reconcile is idempotent
   - Reconcile restarts a subscription when its registry config (endpoint, require_sig) changed -- `SubscriptionConfigChanged` in policy.go is the diff
+  - Stored endpoints contain only the host and optional port. Subscriptions always dial `wss://<host>/xrpc/com.atproto.label.subscribeLabels`, regardless of the advertised scheme.
+  - `SetDialTLSConfig` supplies certificate trust for test labelers before subscriptions start. The dial TLS config seam is nil in production.
   - Subscriptions resume from persisted `last_upstream_seq` cursor
   - Cursor is written after successful persist (crash-safe ordering); a frame whose labels are all dropped by sig policy still advances the cursor (nothing to lose on crash)
   - Labels are passed through byte-faithful (unmodified) -- the relay never re-signs
@@ -17,7 +19,7 @@ Manages per-labeler upstream WebSocket subscriptions. Reconciles the set of acti
 - **Expects**: Registry returns enabled labelers with valid endpoints. Persist never blocks indefinitely.
 
 ## Dependencies
-- **Uses**: store (LabelPersist, LabelerRegistry, IngestEvent), indigo stream/schedulers. Metrics decoupled via callback injection (onDropUnsigned, onIngested, onThrottled, onUpstreams — wired from main.go).
+- **Uses**: store (LabelPersist, LabelerRegistry, IngestEvent), labelerendpoint (SubscribeURL), indigo stream/schedulers. Metrics decoupled via callback injection (onDropUnsigned, onIngested, onThrottled, onUpstreams — wired from main.go).
 - **Used by**: main.go (Run + Reconcile), firehose (poke triggers Reconcile), admin (poke triggers Reconcile)
 - **Boundary**: Must not import server or admin
 

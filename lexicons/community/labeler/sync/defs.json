@@ -15,7 +15,7 @@
         },
         "endpoint": {
           "type": "string",
-          "description": "Labeler service endpoint URL. Stays empty until discovery resolves the endpoint for the labeler."
+          "description": "Labeler host, including its port when the DID document specifies one. Stays empty until the relay resolves the labeler's DID document."
         },
         "source": {
           "type": "string",

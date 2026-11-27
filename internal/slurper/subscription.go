@@ -4,10 +4,11 @@ package slurper
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"github.com/scarndp/labeler-relay/internal/labelerendpoint"
 	"log/slog"
 	"math/rand"
-	"net/url"
 	"time"
 
 	"github.com/bluesky-social/indigo/api/atproto"
@@ -20,14 +21,15 @@ import (
 
 // subscription owns one labeler's upstream connection lifecycle and frame handling.
 type subscription struct {
-	labeler         store.Labeler
-	persist         *store.LabelPersist
-	registry        *store.LabelerRegistry
-	limiter         *Limiter
-	sigDefault      bool
-	log             *slog.Logger
-	onDropUnsigned  func(did string)       // called when a label is dropped for missing signature; may be nil
-	onIngested      func(did string, n int) // called after a successful PersistIngest with the count kept; may be nil
+	dialTLS        *tls.Config
+	labeler        store.Labeler
+	persist        *store.LabelPersist
+	registry       *store.LabelerRegistry
+	limiter        *Limiter
+	sigDefault     bool
+	log            *slog.Logger
+	onDropUnsigned func(did string)        // called when a label is dropped for missing signature; may be nil
+	onIngested     func(did string, n int) // called after a successful PersistIngest with the count kept; may be nil
 }
 
 // run starts the subscription loop with redial + backoff. It blocks until ctx is cancelled.
@@ -80,28 +82,14 @@ func (s *subscription) dial(ctx context.Context) error {
 		return fmt.Errorf("failed to read cursor: %w", err)
 	}
 
-	endpoint := s.labeler.Endpoint
-
-	u, err := url.Parse(endpoint)
+	endpoint, err := labelerendpoint.SubscribeURL(s.labeler.Endpoint, lastSeq)
 	if err != nil {
 		return fmt.Errorf("invalid endpoint URL: %w", err)
 	}
-	if u.Scheme == "http" {
-		u.Scheme = "ws"
-	} else if u.Scheme == "https" {
-		u.Scheme = "wss"
-	}
-
-	if lastSeq != nil {
-		q := u.Query()
-		q.Set("cursor", fmt.Sprintf("%d", *lastSeq))
-		u.RawQuery = q.Encode()
-	}
-
-	endpoint = u.String()
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:  s.dialTLS,
 	}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {

@@ -42,13 +42,13 @@ func TestSlurperStartsSubscriptionsForEnabledLabelers(t *testing.T) {
 	// Insert two enabled labelers.
 	labelerA := store.Labeler{
 		DID:      "did:plc:labelerA",
-		Endpoint: fakeServerA.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerA.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
 	labelerB := store.Labeler{
 		DID:      "did:plc:labelerB",
-		Endpoint: fakeServerB.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerB.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -67,6 +67,7 @@ func TestSlurperStartsSubscriptionsForEnabledLabelers(t *testing.T) {
 		LimitConfig{PerSec: 1000, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	slurper.SetDialTLSConfig(fakeServerA.tlsConfig())
 	defer slurper.Shutdown()
 
 	// Call Reconcile to start subscriptions.
@@ -159,13 +160,13 @@ func TestSlurperStopsDisabledLabelers(t *testing.T) {
 
 	labelerA := store.Labeler{
 		DID:      "did:plc:slurperA",
-		Endpoint: fakeServerA.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerA.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
 	labelerB := store.Labeler{
 		DID:      "did:plc:slurperB",
-		Endpoint: fakeServerB.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerB.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -184,6 +185,7 @@ func TestSlurperStopsDisabledLabelers(t *testing.T) {
 		LimitConfig{PerSec: 1000, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	slurper.SetDialTLSConfig(fakeServerA.tlsConfig())
 	defer slurper.Shutdown()
 
 	if err := slurper.Reconcile(context.Background()); err != nil {
@@ -346,13 +348,13 @@ func TestSlurperIsolatesRateLimitingPerLabeler(t *testing.T) {
 
 	labelerSaturated := store.Labeler{
 		DID:      "did:plc:saturated",
-		Endpoint: fakeServerSaturated.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerSaturated.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
 	labelerFree := store.Labeler{
 		DID:      "did:plc:free",
-		Endpoint: fakeServerFree.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerFree.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -370,6 +372,7 @@ func TestSlurperIsolatesRateLimitingPerLabeler(t *testing.T) {
 	// labeler gets 1 token/sec (so 5 frames take ~4s); the free labeler gets a
 	// high limit (effectively unthrottled).
 	subSaturated := &subscription{
+		dialTLS:    fakeServerSaturated.tlsConfig(),
 		labeler:    labelerSaturated,
 		persist:    persist,
 		registry:   registry,
@@ -378,6 +381,7 @@ func TestSlurperIsolatesRateLimitingPerLabeler(t *testing.T) {
 		log:        log,
 	}
 	subFree := &subscription{
+		dialTLS:    fakeServerFree.tlsConfig(),
 		labeler:    labelerFree,
 		persist:    persist,
 		registry:   registry,
@@ -470,6 +474,8 @@ func TestSlurperPokeCoalescesMultipleSignals(t *testing.T) {
 	registry := store.NewLabelerRegistry(testStore)
 	persist := store.NewLabelPersist(testStore)
 
+	fakeServer := newFakeLabelerServer(t)
+	defer fakeServer.Close()
 	sl := New(
 		registry,
 		persist,
@@ -477,6 +483,7 @@ func TestSlurperPokeCoalescesMultipleSignals(t *testing.T) {
 		LimitConfig{PerSec: 1000, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	sl.SetDialTLSConfig(fakeServer.tlsConfig())
 	defer sl.Shutdown()
 
 	var reconcileCount int32
@@ -548,6 +555,7 @@ func TestSlurperPokeTriggersReconcile(t *testing.T) {
 		LimitConfig{PerSec: 1000, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	sl.SetDialTLSConfig(fakeServer.tlsConfig())
 	defer sl.Shutdown()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -559,7 +567,7 @@ func TestSlurperPokeTriggersReconcile(t *testing.T) {
 	// Register a labeler after Run has started.
 	labeler := store.Labeler{
 		DID:      "did:plc:poke-test",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServer.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -603,7 +611,7 @@ func TestSlurperReconcileIsIdempotent(t *testing.T) {
 
 	labeler := store.Labeler{
 		DID:      "did:plc:idempotent",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServer.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -619,6 +627,7 @@ func TestSlurperReconcileIsIdempotent(t *testing.T) {
 		LimitConfig{PerSec: 1000, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	slurper.SetDialTLSConfig(fakeServer.tlsConfig())
 	defer slurper.Shutdown()
 
 	// First Reconcile.
@@ -673,7 +682,7 @@ func TestSlurperReconcileRestartsOnEndpointChange(t *testing.T) {
 
 	labeler := store.Labeler{
 		DID:      "did:plc:endpoint-move",
-		Endpoint: fakeServerOld.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerOld.endpoint(),
 		Source:   "firehose",
 		Enabled:  true,
 	}
@@ -688,6 +697,7 @@ func TestSlurperReconcileRestartsOnEndpointChange(t *testing.T) {
 		LimitConfig{PerSec: 1000, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	slurper.SetDialTLSConfig(fakeServerOld.tlsConfig())
 	defer slurper.Shutdown()
 
 	if err := slurper.Reconcile(context.Background()); err != nil {
@@ -704,7 +714,7 @@ func TestSlurperReconcileRestartsOnEndpointChange(t *testing.T) {
 	}
 
 	// The labeler moves hosts: a firehose-sourced upsert refreshes the endpoint.
-	labeler.Endpoint = fakeServerNew.server.URL + "/xrpc/com.atproto.label.subscribeLabels"
+	labeler.Endpoint = fakeServerNew.endpoint()
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
 		t.Fatalf("failed to upsert new endpoint: %v", err)
 	}
@@ -767,7 +777,7 @@ func TestSlurperReconcileRestartsOnRequireSigChange(t *testing.T) {
 
 	labeler := store.Labeler{
 		DID:      "did:plc:sig-change",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServer.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -782,6 +792,7 @@ func TestSlurperReconcileRestartsOnRequireSigChange(t *testing.T) {
 		LimitConfig{PerSec: 1000, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	slurper.SetDialTLSConfig(fakeServer.tlsConfig())
 	defer slurper.Shutdown()
 
 	if err := slurper.Reconcile(context.Background()); err != nil {
@@ -842,13 +853,13 @@ func TestSlurperReconcileIsolatesRateLimitingPerLabeler(t *testing.T) {
 
 	labelerA := store.Labeler{
 		DID:      "did:plc:reconcile-saturated",
-		Endpoint: fakeServerA.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerA.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
 	labelerB := store.Labeler{
 		DID:      "did:plc:reconcile-free",
-		Endpoint: fakeServerB.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServerB.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -869,6 +880,7 @@ func TestSlurperReconcileIsolatesRateLimitingPerLabeler(t *testing.T) {
 		LimitConfig{PerSec: 2, PerHour: 100000},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	slurper.SetDialTLSConfig(fakeServerA.tlsConfig())
 	defer slurper.Shutdown()
 
 	// Reconcile to start both subscriptions.

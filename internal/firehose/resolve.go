@@ -9,12 +9,8 @@ import (
 
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
+	"github.com/scarndp/labeler-relay/internal/labelerendpoint"
 )
-
-// subscribeLabelsPath is the XRPC path for the labeler subscription endpoint.
-// AT Protocol labelers advertise only a base serviceEndpoint in their DID docs;
-// the subscription path is appended by convention.
-const subscribeLabelsPath = "/xrpc/com.atproto.label.subscribeLabels"
 
 // ErrNoLabelerEndpoint is returned when a DID document lacks an atproto_labeler service endpoint.
 var ErrNoLabelerEndpoint = fmt.Errorf("no atproto_labeler service endpoint in DID document")
@@ -35,10 +31,8 @@ func NewIndigoResolver(r identity.Resolver) DIDResolver {
 	return &indigoResolver{inner: r}
 }
 
-// LabelerEndpoint resolves the atproto_labeler service endpoint for a DID and
-// returns the full subscribeLabels WebSocket subscription URL. AT Protocol
-// labelers advertise only a base serviceEndpoint (e.g. "https://mod.bsky.app")
-// in their DID documents; this method appends the XRPC subscription path.
+// LabelerEndpoint returns the advertised labeler host and optional port.
+// The relay builds its own secure subscription URL, regardless of the advertised scheme.
 func (r *indigoResolver) LabelerEndpoint(ctx context.Context, did string) (string, error) {
 	didDoc, err := r.inner.ResolveDID(ctx, syntax.DID(did))
 	if err != nil {
@@ -65,12 +59,5 @@ func (r *indigoResolver) LabelerEndpoint(ctx context.Context, did string) (strin
 		return "", ErrNoLabelerEndpoint
 	}
 
-	// Append the subscribeLabels XRPC path if not already present.
-	// The DID doc serviceEndpoint is a base URL; callers (slurper) expect the
-	// full path so they can directly dial after scheme conversion.
-	if !strings.HasSuffix(base, subscribeLabelsPath) {
-		base = strings.TrimRight(base, "/") + subscribeLabelsPath
-	}
-
-	return base, nil
+	return labelerendpoint.Host(base)
 }

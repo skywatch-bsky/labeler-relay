@@ -88,7 +88,7 @@ func TestHealth_AC10_3_ReportsHeadSeqLabelerCountAndRetention(t *testing.T) {
 	// Register 2 labelers.
 	err = reg.Upsert(ctx, store.Labeler{
 		DID:       "did:plc:labeler1",
-		Endpoint:  "https://labeler1.example.com",
+		Endpoint:  "labeler1.example.com",
 		Source:    "manual",
 		Enabled:   true,
 		UpdatedAt: time.Now().Unix(),
@@ -96,7 +96,7 @@ func TestHealth_AC10_3_ReportsHeadSeqLabelerCountAndRetention(t *testing.T) {
 	require.NoError(t, err)
 	err = reg.Upsert(ctx, store.Labeler{
 		DID:       "did:plc:labeler2",
-		Endpoint:  "https://labeler2.example.com",
+		Endpoint:  "labeler2.example.com",
 		Source:    "manual",
 		Enabled:   true,
 		UpdatedAt: time.Now().Unix(),
