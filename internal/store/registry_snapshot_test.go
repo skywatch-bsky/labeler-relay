@@ -66,17 +66,34 @@ func TestListWithDeclarationsSingleSnapshot(t *testing.T) {
 		t.Fatalf("snapshot read: declarations=%v, want the pre-write declaration — the interleaved write must not tear the snapshot", got)
 	}
 
-	// Each call takes its own snapshot: by now the interleaved write is
-	// committed, so GetWithDeclarations must observe the post-write state
-	// as a whole (disabled AND undeclared — never a mix).
+	// GetWithDeclarations gets its own interleaving: restore the pre-write
+	// state, then let the seam commit the same flip while Get's two queries
+	// straddle it. The read snapshot was taken at Get's first query, so both
+	// halves must show the pre-write state — a separate-reads
+	// implementation would return the labeler enabled while its second
+	// query already observed the write (torn).
+	if _, err := s.DB().ExecContext(ctx, `UPDATE labelers SET enabled = 1 WHERE did = ?`, did); err != nil {
+		t.Fatalf("reseed enable: %v", err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO labeler_declarations(did, collection) VALUES (?, 'app.bsky.labeler.service')`, did); err != nil {
+		t.Fatalf("reseed declaration: %v", err)
+	}
 	row, decs, found, err := reg.GetWithDeclarations(ctx, did)
 	if err != nil || !found {
 		t.Fatalf("GetWithDeclarations: found=%v err=%v", found, err)
 	}
-	if row.Enabled {
-		t.Fatalf("post-write Get: row=%+v, want the disabled row", row)
+	if !row.Enabled || len(decs) != 1 || decs[0] != "app.bsky.labeler.service" {
+		t.Fatalf("snapshot Get: row=%+v decs=%v, want the pre-write enabled row and declaration — the interleaved write must not tear the snapshot", row, decs)
 	}
-	if len(decs) != 0 {
-		t.Fatalf("post-write Get: decs=%v, want none", decs)
+
+	// With the seam removed, the next read observes the committed write as
+	// a whole.
+	testBetweenSnapshotReads = nil
+	row, decs, _, err = reg.GetWithDeclarations(ctx, did)
+	if err != nil {
+		t.Fatalf("final Get: %v", err)
+	}
+	if row.Enabled || len(decs) != 0 {
+		t.Fatalf("final Get: row=%+v decs=%v, want the post-write disabled row with no declarations", row, decs)
 	}
 }
