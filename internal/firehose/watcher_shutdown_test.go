@@ -3,6 +3,7 @@ package firehose
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -303,7 +304,10 @@ func TestShutdownMidCommitReplaysCommit(t *testing.T) {
 			// The ops before it completed; this one is in flight. Stop the process.
 			cancel()
 			select {
-			case <-done:
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Run returned %v; want context.Canceled", err)
+				}
 			case <-time.After(10 * time.Second):
 				t.Fatalf("Run did not return after cancellation")
 			}
@@ -329,8 +333,19 @@ func TestShutdownMidCommitReplaysCommit(t *testing.T) {
 				slog.New(slog.NewTextHandler(io.Discard, nil)))
 			restarted.SetCursorFlushThresholds(1_000_000, time.Hour)
 			restartCtx, stopRestart := context.WithCancel(ctx)
-			defer stopRestart()
-			go func() { _ = restarted.Run(restartCtx) }()
+			restartDone := make(chan error, 1)
+			go func() { restartDone <- restarted.Run(restartCtx) }()
+			defer func() {
+				stopRestart()
+				select {
+				case err := <-restartDone:
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("restarted Run returned %v; want context.Canceled", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Errorf("restarted Run did not return after cancellation")
+				}
+			}()
 			awaitHead(t, persist, int64(tc.gateAt-1+len(tc.rkeys)))
 
 			row, found, err := registry.Get(ctx, did)
