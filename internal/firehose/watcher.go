@@ -192,6 +192,11 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 		return nil
 	}
 
+	// interrupted is set when cancellation cut this commit short: an op
+	// failed because the context ended, so it and every op after it were
+	// neither registered nor recorded as an error.
+	var interrupted error
+
 	for _, op := range ops {
 		w.log.Debug("labeler op", "did", op.RepoDID, "action", op.Action, "rkey", op.Rkey)
 
@@ -205,6 +210,9 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 				} else {
 					w.log.Error("resolve endpoint failed", "did", op.RepoDID, "err", err)
 					_ = w.registry.RecordError(ctx, op.RepoDID, err.Error())
+				}
+				if ctx.Err() != nil {
+					interrupted = ctx.Err()
 				}
 				continue
 			}
@@ -223,6 +231,9 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 			})
 			if err != nil {
 				w.log.Error("upsert failed", "did", op.RepoDID, "err", err)
+				if ctx.Err() != nil {
+					interrupted = ctx.Err()
+				}
 				continue
 			}
 
@@ -234,6 +245,9 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 			})
 			if err != nil {
 				w.log.Error("persist failed", "did", op.RepoDID, "err", err)
+				if ctx.Err() != nil {
+					interrupted = ctx.Err()
+				}
 				continue
 			}
 
@@ -243,6 +257,14 @@ func (w *FirehoseWatcher) handleCommit(ctx context.Context, commit *comatproto.S
 			// (Manual stickiness is enforced at the registry level.)
 			// For now, we skip this—only enable on discovery, don't disable.
 		}
+	}
+
+	if interrupted != nil {
+		// The commit did not complete, so it must not count as processed:
+		// leave the cursor at the last fully processed commit and the restart
+		// replays this one. Staging its seq here would make the deferred flush
+		// persist it and the interrupted ops would be lost.
+		return interrupted
 	}
 
 	// Stage the cursor and flush to the store in batches to reduce write
