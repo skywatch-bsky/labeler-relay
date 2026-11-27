@@ -207,7 +207,7 @@ Example response:
   "labelers": [
     {
       "did": "did:plc:ar7c4by46qjdydhdevvrndac",
-      "endpoint": "https://bsky.app/xrpc/com.atproto.label.subscribeLabels",
+      "endpoint": "bsky.app",
       "source": "manual",
       "enabled": true,
       "last_upstream_seq": 35916330
@@ -225,7 +225,7 @@ Example response:
 ```
 
 `labelers` lists registry entries oldest-observed first: the order in which the relay first observed them, not DID order. `source` is `firehose` for discovered labelers or `manual` for entries added through the admin API.
-`endpoint` stays empty until discovery resolves the labeler's DID document. `last_upstream_seq` is the last sequence ingested from that labeler; it is `null` when the labeler has never ingested.
+`endpoint` is the labeler's host, including its port when the DID document specifies one. It stays empty until the relay resolves the labeler's DID document. `last_upstream_seq` is the last sequence ingested from that labeler; it is `null` when the labeler has never ingested.
 `cursor` is the `observed_seq` of the last labeler on the page. Pass it back to fetch the next page; a response without `cursor` is the last page.
 
 Parameters:
@@ -259,7 +259,7 @@ Example response:
 ```json
 {
   "did": "did:plc:ar7c4by46qjdydhdevvrndac",
-  "endpoint": "https://bsky.app/xrpc/com.atproto.label.subscribeLabels",
+  "endpoint": "bsky.app",
   "source": "manual",
   "enabled": true,
   "last_upstream_seq": 35916330

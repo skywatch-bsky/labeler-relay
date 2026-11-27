@@ -9,7 +9,7 @@ import (
 // fakeDIDResolver implements DIDResolver for testing.
 type fakeDIDResolver struct {
 	endpoints map[string]string // did -> endpoint
-	errs      map[string]error   // did -> error
+	errs      map[string]error  // did -> error
 }
 
 func (f *fakeDIDResolver) LabelerEndpoint(ctx context.Context, did string) (string, error) {
@@ -26,7 +26,7 @@ func (f *fakeDIDResolver) LabelerEndpoint(ctx context.Context, did string) (stri
 func TestLabelerEndpointSuccess(t *testing.T) {
 	fake := &fakeDIDResolver{
 		endpoints: map[string]string{
-			"did:plc:labeler123": "https://example.com/labeler",
+			"did:plc:labeler123": "example.com",
 		},
 	}
 
@@ -35,8 +35,8 @@ func TestLabelerEndpointSuccess(t *testing.T) {
 		t.Fatalf("LabelerEndpoint failed: %v", err)
 	}
 
-	if ep != "https://example.com/labeler" {
-		t.Errorf("expected endpoint 'https://example.com/labeler', got %q", ep)
+	if ep != "example.com" {
+		t.Errorf("expected endpoint 'example.com', got %q", ep)
 	}
 }
 

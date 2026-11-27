@@ -143,13 +143,7 @@ func (h *Harness) Close() {
 	})
 }
 
-// RegisterLabeler adds a labeler to the relay via the admin API. endpoint is
-// the full URL of the labeler's subscribeLabels endpoint
-// (e.g. "https://mod.bsky.app/xrpc/com.atproto.label.subscribeLabels").
-// The admin API resolves the labeler endpoint from the DID; pass endpoint=""
-// to use a resolver-backed DID, or wire a mock resolver by controlling the
-// relay's DID resolver (not yet exposed — see RegisterLabelerWithEndpoint
-// if you need to override endpoint resolution in tests).
+// RegisterLabeler adds a labeler through the admin API, which resolves its host from the DID document.
 func (h *Harness) RegisterLabeler(did string) error {
 	body, err := json.Marshal(map[string]string{"did": did})
 	if err != nil {
@@ -505,4 +499,3 @@ func freeLocalAddr() (string, error) {
 	l.Close()
 	return addr, nil
 }
-

@@ -15,7 +15,6 @@ import (
 	"github.com/scarndp/labeler-relay/internal/store"
 )
 
-
 // TestSubscriptionIngestsSignedLabels verifies AC4.1: a signed label from an
 // enabled labeler is persisted.
 func TestSubscriptionIngestsSignedLabels(t *testing.T) {
@@ -39,10 +38,10 @@ func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 	persist := store.NewLabelPersist(testStore)
 
 	labeler := store.Labeler{
-		DID:      "did:plc:test123",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
-		Source:   "test",
-		Enabled:  true,
+		DID:        "did:plc:test123",
+		Endpoint:   fakeServer.endpoint(),
+		Source:     "test",
+		Enabled:    true,
 		RequireSig: boolPtr(true),
 	}
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
@@ -50,6 +49,7 @@ func TestSubscriptionIngestsSignedLabels(t *testing.T) {
 	}
 
 	sub := &subscription{
+		dialTLS:    fakeServer.tlsConfig(),
 		labeler:    labeler,
 		persist:    persist,
 		registry:   registry,
@@ -132,10 +132,10 @@ func TestSubscriptionByteFailfulSigPassthrough(t *testing.T) {
 	persist := store.NewLabelPersist(testStore)
 
 	labeler := store.Labeler{
-		DID:      "did:plc:test456",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
-		Source:   "test",
-		Enabled:  true,
+		DID:        "did:plc:test456",
+		Endpoint:   fakeServer.endpoint(),
+		Source:     "test",
+		Enabled:    true,
 		RequireSig: boolPtr(true),
 	}
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
@@ -143,6 +143,7 @@ func TestSubscriptionByteFailfulSigPassthrough(t *testing.T) {
 	}
 
 	sub := &subscription{
+		dialTLS:    fakeServer.tlsConfig(),
 		labeler:    labeler,
 		persist:    persist,
 		registry:   registry,
@@ -243,7 +244,7 @@ func TestSubscriptionSourceIsOriginLabeler(t *testing.T) {
 	labelerDID := "did:plc:labeler789"
 	labeler := store.Labeler{
 		DID:      labelerDID,
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServer.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -252,6 +253,7 @@ func TestSubscriptionSourceIsOriginLabeler(t *testing.T) {
 	}
 
 	sub := &subscription{
+		dialTLS:    fakeServer.tlsConfig(),
 		labeler:    labeler,
 		persist:    persist,
 		registry:   registry,
@@ -344,7 +346,7 @@ func TestSubscriptionRedialOnServerRestart(t *testing.T) {
 
 	labeler := store.Labeler{
 		DID:      "did:plc:testredial",
-		Endpoint: fakeServer1.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServer1.endpoint(),
 		Source:   "test",
 		Enabled:  true,
 	}
@@ -353,6 +355,7 @@ func TestSubscriptionRedialOnServerRestart(t *testing.T) {
 	}
 
 	sub := &subscription{
+		dialTLS:    fakeServer1.tlsConfig(),
 		labeler:    labeler,
 		persist:    persist,
 		registry:   registry,
@@ -486,10 +489,10 @@ func TestSubscriptionDropsUnsignedLabelsWhenRequireSigTrue(t *testing.T) {
 
 	// Labeler with require_sig=nil, global default=true => sig required.
 	labeler := store.Labeler{
-		DID:      "did:plc:unsigned-drop-test",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
-		Source:   "test",
-		Enabled:  true,
+		DID:        "did:plc:unsigned-drop-test",
+		Endpoint:   fakeServer.endpoint(),
+		Source:     "test",
+		Enabled:    true,
 		RequireSig: nil,
 	}
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
@@ -497,6 +500,7 @@ func TestSubscriptionDropsUnsignedLabelsWhenRequireSigTrue(t *testing.T) {
 	}
 
 	sub := &subscription{
+		dialTLS:    fakeServer.tlsConfig(),
 		labeler:    labeler,
 		persist:    persist,
 		registry:   registry,
@@ -681,10 +685,10 @@ func TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride(t *testing.
 
 	// Labeler with require_sig=false override, global default=true => sig NOT required for this labeler.
 	labeler := store.Labeler{
-		DID:      "did:plc:unsigned-relay-test",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
-		Source:   "test",
-		Enabled:  true,
+		DID:        "did:plc:unsigned-relay-test",
+		Endpoint:   fakeServer.endpoint(),
+		Source:     "test",
+		Enabled:    true,
 		RequireSig: boolPtr(false),
 	}
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
@@ -692,6 +696,7 @@ func TestSubscriptionRelaysUnsignedLabelsWhenRequireSigFalseOverride(t *testing.
 	}
 
 	sub := &subscription{
+		dialTLS:    fakeServer.tlsConfig(),
 		labeler:    labeler,
 		persist:    persist,
 		registry:   registry,
@@ -790,10 +795,10 @@ func TestSubscriptionIncrementsIngestedTotalMetric(t *testing.T) {
 	persist := store.NewLabelPersist(testStore)
 
 	labeler := store.Labeler{
-		DID:      "did:plc:ingested-metric-test",
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
-		Source:   "test",
-		Enabled:  true,
+		DID:        "did:plc:ingested-metric-test",
+		Endpoint:   fakeServer.endpoint(),
+		Source:     "test",
+		Enabled:    true,
 		RequireSig: boolPtr(true),
 	}
 	if err := registry.Upsert(context.Background(), labeler); err != nil {
@@ -801,6 +806,7 @@ func TestSubscriptionIncrementsIngestedTotalMetric(t *testing.T) {
 	}
 
 	sub := &subscription{
+		dialTLS:    fakeServer.tlsConfig(),
 		labeler:    labeler,
 		persist:    persist,
 		registry:   registry,
@@ -932,4 +938,3 @@ func getMetricValue(reg *prometheus.Registry, metricName, labelValue string) (fl
 	}
 	return 0, fmt.Errorf("metric %s with label %s not found", metricName, labelValue)
 }
-

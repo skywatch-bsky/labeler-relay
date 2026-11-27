@@ -1,6 +1,6 @@
 # Server
 
-Last verified: 2026-11-26
+Last verified: 2026-11-27
 
 ## Purpose
 Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSocket and the public XRPC query endpoints over the labeler registry. Handles cursor validation, backfill-to-live seam stitching, XRPC frame encoding, and per-client-IP rate limiting for queries.
@@ -8,6 +8,7 @@ Serves the `community.labeler.sync.subscribeLabelers` output stream over WebSock
 ## Contracts
 - **Exposes**: `Server` (HandleSubscribeLabelers, HandleGetLabelers, HandleGetLabeler, HandleHealth), `Hub` (Broadcast, Subscribe), `StreamFrom` (backfill+live compositor), `QueryRateLimiter` (NewQueryRateLimiter, Middleware, SetRateLimitedCallback, Close), `MetricsHandler`, XRPC frame writers (WriteMessage, WriteError)
 - **Guarantees**:
+  - Both query APIs return the stored `endpoint` unchanged: the host and optional port, or empty until DID discovery resolves it. No display URL is constructed.
   - Backfill-to-live seam delivers exactly-once: live events with seq <= last backfill seq are dropped
   - Slow consumers are dropped (channel closed) rather than blocking the write path
   - FutureCursor returns an error frame; OutdatedCursor sends #info then resumes from floor

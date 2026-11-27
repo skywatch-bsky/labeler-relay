@@ -1,6 +1,6 @@
 # Store
 
-Last verified: 2026-11-26
+Last verified: 2026-11-27
 
 ## Purpose
 Single source of truth for event persistence and labeler registration. Owns the SQLite database, global relay sequence minting, and retention pruning.
@@ -8,6 +8,7 @@ Single source of truth for event persistence and labeler registration. Owns the 
 ## Contracts
 - **Exposes**: `Store` (DB lifecycle, meta KV), `LabelPersist` (ingest, playback, head/floor, prune), `LabelerRegistry` (CRUD, cursor read/write), `PruneJob`, frame encode/decode helpers
 - **Guarantees**:
+  - `labelers.endpoint` holds only the host and optional port, or an empty string before resolution. Older databases migrate on open in one idempotent transaction. Invalid endpoints remain unchanged. The migration preserves `updated_at`.
   - `relay_seq` is strictly monotonic via AUTOINCREMENT; never reused even after prune/restart
   - `observed_seq` is strictly monotonic and never reused: minted at first insert only as MAX(observed_seq)+1; re-upserts (firehose or manual) and RecordError on an existing DID never touch it; a unique index enforces one row per value; labeler rows are never deleted, so values are never reclaimed. `List` returns rows ascending by observed_seq (first-observed first); `ListEnabled` keeps `ORDER BY did` (internal set semantics for Reconcile; order is irrelevant there)
   - `Store.Open` runs an idempotent migration that adds `observed_seq` to pre-migration databases, backfills it in rowid order (a practical approximation of insert order), and creates the unique index — all in one transaction; an interrupted run rolls back wholesale and the next `Open` completes it
@@ -19,7 +20,7 @@ Single source of truth for event persistence and labeler registration. Owns the 
 - **Expects**: Single process owns the database (WAL mode, single-writer)
 
 ## Dependencies
-- **Uses**: modernc.org/sqlite, indigo types (LabelDefs_Label, LabelerService, persist.EventPersistence)
+- **Uses**: modernc.org/sqlite, indigo types (LabelDefs_Label, LabelerService, persist.EventPersistence), labelerendpoint (Host, for the endpoint migration)
 - **Used by**: slurper (ingest + cursor), firehose (ingest + registry + meta), server (playback + hub broadcast + registry reads), admin (registry CRUD), main.go (wiring)
 - **Boundary**: Must not import metrics, slurper, server, admin, or firehose
 

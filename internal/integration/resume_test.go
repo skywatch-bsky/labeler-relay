@@ -17,8 +17,8 @@ import (
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
-	lexutil "github.com/bluesky-social/indigo/lex/util"
 	"github.com/bluesky-social/indigo/cmd/relay/stream"
+	lexutil "github.com/bluesky-social/indigo/lex/util"
 	"github.com/gorilla/websocket"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multihash"
@@ -28,7 +28,6 @@ import (
 	"github.com/scarndp/labeler-relay/internal/slurper"
 	"github.com/scarndp/labeler-relay/internal/store"
 )
-
 
 type fakeLabelerServer struct {
 	server      *httptest.Server
@@ -74,7 +73,7 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 			}
 		}
 	})
-	fls.server = httptest.NewServer(mux)
+	fls.server = httptest.NewTLSServer(mux)
 
 	fls.sendFrame = func(frame *atproto.LabelSubscribeLabels_Labels) error {
 		fls.mu.Lock()
@@ -273,7 +272,6 @@ func (fs *fakeSubscribeReposServer) Close() {
 	fs.server.Close()
 }
 
-
 func discardLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -308,7 +306,6 @@ func (f *fakeDIDResolver) LabelerEndpoint(_ context.Context, _ string) (string, 
 	return f.endpoint, nil
 }
 
-
 // TestResumeSlurper verifies AC10.1: after a slurper is stopped, a new slurper
 // over the same store dials the upstream with ?cursor=<persisted_seq>.
 func TestResumeSlurper(t *testing.T) {
@@ -328,13 +325,12 @@ func TestResumeSlurper(t *testing.T) {
 
 	if err := registry.Upsert(context.Background(), store.Labeler{
 		DID:      did,
-		Endpoint: fakeServer.server.URL + "/xrpc/com.atproto.label.subscribeLabels",
+		Endpoint: fakeServer.server.Listener.Addr().String(),
 		Source:   "test",
 		Enabled:  true,
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-
 
 	slurper1 := slurper.New(
 		registry, persist,
@@ -343,6 +339,7 @@ func TestResumeSlurper(t *testing.T) {
 		discardLog(),
 	)
 
+	slurper1.SetDialTLSConfig(fakeServer.server.Client().Transport.(*http.Transport).TLSClientConfig.Clone())
 	ctx1, cancel1 := context.WithCancel(context.Background())
 
 	if err := slurper1.Reconcile(ctx1); err != nil {
@@ -393,13 +390,13 @@ func TestResumeSlurper(t *testing.T) {
 	fakeServer.resetForNextDial()
 	prevDialCount := fakeServer.dialCount()
 
-
 	slurper2 := slurper.New(
 		registry, persist,
 		false,
 		slurper.LimitConfig{PerSec: 1000, PerHour: 100000},
 		discardLog(),
 	)
+	slurper2.SetDialTLSConfig(fakeServer.server.Client().Transport.(*http.Transport).TLSClientConfig.Clone())
 	defer slurper2.Shutdown()
 
 	ctx2, cancel2 := context.WithCancel(context.Background())

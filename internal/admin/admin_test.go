@@ -44,8 +44,8 @@ func setupTestEnv(t *testing.T) (*store.Store, *API, string) {
 
 	resolver := &fakeDIDResolver{
 		endpoints: map[string]string{
-			"did:plc:labeler1": "https://labeler1.example.com/labels",
-			"did:plc:labeler2": "https://labeler2.example.com/labels",
+			"did:plc:labeler1": "labeler1.example.com",
+			"did:plc:labeler2": "labeler2.example.com",
 		},
 	}
 
@@ -80,7 +80,7 @@ func TestAdminAPI(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, found, "labeler should be in registry")
 		assert.Equal(t, "did:plc:labeler1", labeler.DID)
-		assert.Equal(t, "https://labeler1.example.com/labels", labeler.Endpoint)
+		assert.Equal(t, "labeler1.example.com", labeler.Endpoint)
 		assert.Equal(t, "manual", labeler.Source)
 		assert.True(t, labeler.Enabled)
 	})
@@ -111,7 +111,7 @@ func TestAdminAPI(t *testing.T) {
 		require.True(t, found)
 		assert.True(t, labeler.Enabled, "manual add must enable a previously wedged labeler")
 		assert.Equal(t, "manual", labeler.Source)
-		assert.Equal(t, "https://labeler1.example.com/labels", labeler.Endpoint)
+		assert.Equal(t, "labeler1.example.com", labeler.Endpoint)
 
 		// The response body must reflect the persisted row, not the request.
 		var respLabeler store.Labeler
@@ -127,10 +127,10 @@ func TestAdminAPI(t *testing.T) {
 		// Manually add a labeler first
 		ctx := context.Background()
 		err := api.registry.Upsert(ctx, store.Labeler{
-			DID:      "did:plc:labeler1",
-			Endpoint: "https://labeler1.example.com/labels",
-			Source:   "manual",
-			Enabled:  true,
+			DID:       "did:plc:labeler1",
+			Endpoint:  "labeler1.example.com",
+			Source:    "manual",
+			Enabled:   true,
 			UpdatedAt: time.Now().Unix(),
 		})
 		require.NoError(t, err)
@@ -173,9 +173,9 @@ func TestAdminAPI(t *testing.T) {
 		// Update resolver to include the test labeler
 		resolver := &fakeDIDResolver{
 			endpoints: map[string]string{
-				"did:plc:labeler1":       "https://labeler1.example.com/labels",
-				"did:plc:labeler2":       "https://labeler2.example.com/labels",
-				"did:plc:labeler-sticky": "https://sticky.example.com/labels",
+				"did:plc:labeler1":       "labeler1.example.com",
+				"did:plc:labeler2":       "labeler2.example.com",
+				"did:plc:labeler-sticky": "sticky.example.com",
 			},
 		}
 		api.resolver = resolver
@@ -202,10 +202,10 @@ func TestAdminAPI(t *testing.T) {
 		// Step 2: Simulate firehose upsert for X (discovery churn).
 		// This should NOT change source from manual or toggle enabled.
 		err = api.registry.Upsert(ctx, store.Labeler{
-			DID:      "did:plc:labeler-sticky",
-			Endpoint: "https://updated-endpoint.example.com/labels",
-			Source:   "firehose",
-			Enabled:  true,
+			DID:       "did:plc:labeler-sticky",
+			Endpoint:  "updated-endpoint.example.com",
+			Source:    "firehose",
+			Enabled:   true,
 			UpdatedAt: time.Now().Unix(),
 		})
 		require.NoError(t, err)
@@ -225,10 +225,10 @@ func TestAdminAPI(t *testing.T) {
 		// The next upsert from firehose with Enabled:false should NOT flip the enabled bit.
 
 		err = api.registry.Upsert(ctx, store.Labeler{
-			DID:      "did:plc:labeler-sticky",
-			Endpoint: "https://updated-endpoint.example.com/labels",
-			Source:   "firehose",
-			Enabled:  false, // Simulate discovery deleting the record
+			DID:       "did:plc:labeler-sticky",
+			Endpoint:  "updated-endpoint.example.com",
+			Source:    "firehose",
+			Enabled:   false, // Simulate discovery deleting the record
 			UpdatedAt: time.Now().Unix(),
 		})
 		require.NoError(t, err)
@@ -247,19 +247,19 @@ func TestAdminAPI(t *testing.T) {
 
 		// Add two labelers
 		err := api.registry.Upsert(ctx, store.Labeler{
-			DID:      "did:plc:labeler1",
-			Endpoint: "https://labeler1.example.com/labels",
-			Source:   "manual",
-			Enabled:  true,
+			DID:       "did:plc:labeler1",
+			Endpoint:  "labeler1.example.com",
+			Source:    "manual",
+			Enabled:   true,
 			UpdatedAt: time.Now().Unix(),
 		})
 		require.NoError(t, err)
 
 		err = api.registry.Upsert(ctx, store.Labeler{
-			DID:      "did:plc:labeler2",
-			Endpoint: "https://labeler2.example.com/labels",
-			Source:   "firehose",
-			Enabled:  false,
+			DID:       "did:plc:labeler2",
+			Endpoint:  "labeler2.example.com",
+			Source:    "firehose",
+			Enabled:   false,
 			UpdatedAt: time.Now().Unix(),
 		})
 		require.NoError(t, err)
@@ -289,10 +289,10 @@ func TestAdminAPI(t *testing.T) {
 
 		// Add a disabled labeler
 		err := api.registry.Upsert(ctx, store.Labeler{
-			DID:      "did:plc:labeler1",
-			Endpoint: "https://labeler1.example.com/labels",
-			Source:   "manual",
-			Enabled:  false,
+			DID:       "did:plc:labeler1",
+			Endpoint:  "labeler1.example.com",
+			Source:    "manual",
+			Enabled:   false,
 			UpdatedAt: time.Now().Unix(),
 		})
 		require.NoError(t, err)
@@ -320,10 +320,10 @@ func TestAdminAPI(t *testing.T) {
 
 		// Add an enabled labeler
 		err := api.registry.Upsert(ctx, store.Labeler{
-			DID:      "did:plc:labeler1",
-			Endpoint: "https://labeler1.example.com/labels",
-			Source:   "manual",
-			Enabled:  true,
+			DID:       "did:plc:labeler1",
+			Endpoint:  "labeler1.example.com",
+			Source:    "manual",
+			Enabled:   true,
 			UpdatedAt: time.Now().Unix(),
 		})
 		require.NoError(t, err)
@@ -399,7 +399,7 @@ func TestAdminAPI(t *testing.T) {
 
 		require.NoError(t, api.registry.Upsert(ctx, store.Labeler{
 			DID:       "did:plc:labeler1",
-			Endpoint:  "https://labeler1.example.com/labels",
+			Endpoint:  "labeler1.example.com",
 			Source:    "manual",
 			Enabled:   true,
 			UpdatedAt: time.Now().Unix(),

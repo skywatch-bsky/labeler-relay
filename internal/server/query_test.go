@@ -136,9 +136,9 @@ func TestQuery_GetLabelers_Projection(t *testing.T) {
 	ctx := context.Background()
 
 	// Enabled manual labeler that has ingested; observed first.
-	seedLabeler(t, env, "did:plc:zzz", "https://zzz.example.com", "manual", true, ptrInt64(77))
+	seedLabeler(t, env, "did:plc:zzz", "zzz.example.com", "manual", true, ptrInt64(77))
 	// Disabled manual labeler, never ingested; observed second.
-	seedLabeler(t, env, "did:plc:mmm", "https://mmm.example.com", "manual", false, nil)
+	seedLabeler(t, env, "did:plc:mmm", "mmm.example.com", "manual", false, nil)
 	// Discovery-error row: empty endpoint, firehose source, disabled; observed third.
 	require.NoError(t, env.reg.RecordError(ctx, "did:plc:aaa", "resolution failed"))
 
@@ -184,9 +184,9 @@ func TestQuery_GetLabelers_EnabledFilter(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 
-	seedLabeler(t, env, "did:plc:on1", "https://on1.example.com", "manual", true, nil)
-	seedLabeler(t, env, "did:plc:on2", "https://on2.example.com", "manual", true, nil)
-	seedLabeler(t, env, "did:plc:off1", "https://off1.example.com", "manual", false, nil)
+	seedLabeler(t, env, "did:plc:on1", "on1.example.com", "manual", true, nil)
+	seedLabeler(t, env, "did:plc:on2", "on2.example.com", "manual", true, nil)
+	seedLabeler(t, env, "did:plc:off1", "off1.example.com", "manual", false, nil)
 
 	base := env.ts.URL + "/xrpc/community.labeler.sync.getLabelers"
 
@@ -223,7 +223,7 @@ func TestGetLabelersCursorPaginationNumeric(t *testing.T) {
 	// observed order the walk must reproduce.
 	dids := []string{"did:plc:p5", "did:plc:p3", "did:plc:p1", "did:plc:p4", "did:plc:p2"}
 	for i, did := range dids {
-		seedLabeler(t, env, did, fmt.Sprintf("https://p%d.example.com", i+1), "manual", true, nil)
+		seedLabeler(t, env, did, fmt.Sprintf("p%d.example.com", i+1), "manual", true, nil)
 	}
 
 	seen := []string{}
@@ -268,7 +268,7 @@ func TestGetLabelersCursorInvalid(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 
-	seedLabeler(t, env, "did:plc:only", "https://only.example.com", "manual", true, nil)
+	seedLabeler(t, env, "did:plc:only", "only.example.com", "manual", true, nil)
 
 	base := env.ts.URL + "/xrpc/community.labeler.sync.getLabelers"
 	for _, raw := range []string{"cursor=abc", "cursor=-5", "cursor=1.5"} {
@@ -295,7 +295,7 @@ func TestQuery_GetLabelers_DefaultLimit(t *testing.T) {
 	defer env.cleanup()
 
 	for i := 1; i <= 60; i++ {
-		seedLabeler(t, env, fmt.Sprintf("did:plc:q%02d", i), "https://q.example.com", "manual", true, nil)
+		seedLabeler(t, env, fmt.Sprintf("did:plc:q%02d", i), "q.example.com", "manual", true, nil)
 	}
 
 	base := env.ts.URL + "/xrpc/community.labeler.sync.getLabelers"
@@ -329,8 +329,8 @@ func TestGetLabelerViewEmitsNullSeq(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 
-	seedLabeler(t, env, "did:plc:never", "https://never.example.com", "manual", true, nil)
-	seedLabeler(t, env, "did:plc:ingested", "https://ingested.example.com", "manual", true, ptrInt64(9))
+	seedLabeler(t, env, "did:plc:never", "never.example.com", "manual", true, nil)
+	seedLabeler(t, env, "did:plc:ingested", "ingested.example.com", "manual", true, ptrInt64(9))
 
 	resp, err := http.Get(env.ts.URL + "/xrpc/community.labeler.sync.getLabeler?did=did:plc:never")
 	require.NoError(t, err)
@@ -373,7 +373,7 @@ func TestQuery_GetLabeler_Found(t *testing.T) {
 	env := newQueryTestEnv(t)
 	defer env.cleanup()
 
-	seedLabeler(t, env, "did:plc:one", "https://one.example.com", "manual", true, ptrInt64(42))
+	seedLabeler(t, env, "did:plc:one", "one.example.com", "manual", true, ptrInt64(42))
 
 	resp, err := http.Get(env.ts.URL + "/xrpc/community.labeler.sync.getLabeler?did=did:plc:one")
 	require.NoError(t, err)
@@ -384,7 +384,7 @@ func TestQuery_GetLabeler_Found(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Equal(t, "did:plc:one", body["did"])
-	require.Equal(t, "https://one.example.com", body["endpoint"])
+	require.Equal(t, "one.example.com", body["endpoint"])
 	require.Equal(t, "manual", body["source"])
 	require.Equal(t, true, body["enabled"])
 	require.Equal(t, float64(42), body["last_upstream_seq"])

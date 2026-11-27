@@ -75,7 +75,7 @@ func TestRoutes_PublicQueryEndpoints(t *testing.T) {
 
 	require.NoError(t, reg.Upsert(ctx, store.Labeler{
 		DID:       "did:plc:abc",
-		Endpoint:  "https://abc.example.com",
+		Endpoint:  "abc.example.com",
 		Source:    "manual",
 		Enabled:   true,
 		UpdatedAt: 1,
@@ -154,7 +154,7 @@ func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	did := "did:plc:ar7c4by46qjdydhdevvrndac"
 	require.NoError(t, reg.Upsert(ctx, store.Labeler{
 		DID:       did,
-		Endpoint:  "https://bsky.app",
+		Endpoint:  "bsky.app",
 		Source:    "manual",
 		Enabled:   true,
 		UpdatedAt: 1,
@@ -186,7 +186,7 @@ func TestRoutes_ReadmeExamplesMatchResponses(t *testing.T) {
 	require.Len(t, items, 1)
 	first, _ := items[0].(map[string]any)
 	require.Equal(t, did, first["did"])
-	require.Equal(t, "https://bsky.app", first["endpoint"])
+	require.Equal(t, "bsky.app", first["endpoint"])
 	require.Equal(t, "manual", first["source"])
 	require.Equal(t, true, first["enabled"])
 	require.Equal(t, float64(35916330), first["last_upstream_seq"])

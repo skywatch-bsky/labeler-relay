@@ -25,7 +25,7 @@ func TestRegistry(t *testing.T) {
 		requiredSig := true
 		labeler := store.Labeler{
 			DID:        "did:plc:test123",
-			Endpoint:   "https://example.com/labelers",
+			Endpoint:   "example.com",
 			Source:     "manual",
 			Enabled:    true,
 			RequireSig: &requiredSig,
@@ -200,7 +200,7 @@ func TestRegistry(t *testing.T) {
 		did := "did:plc:stickiness-test"
 		manualLabeler := store.Labeler{
 			DID:       did,
-			Endpoint:  "https://example.com/v1",
+			Endpoint:  "example.com",
 			Source:    "manual",
 			Enabled:   true,
 			UpdatedAt: 1000,
@@ -227,7 +227,7 @@ func TestRegistry(t *testing.T) {
 		// Now upsert from firehose with different endpoint and enabled field
 		firehoseLabeler := store.Labeler{
 			DID:       did,
-			Endpoint:  "https://different.com/v2",
+			Endpoint:  "different.com",
 			Source:    "firehose",
 			Enabled:   true,
 			UpdatedAt: 2000,
@@ -251,7 +251,7 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("expected enabled to stay true, got false")
 		}
 		// The endpoint should have been updated
-		if retrieved.Endpoint != "https://different.com/v2" {
+		if retrieved.Endpoint != "different.com" {
 			t.Errorf("expected endpoint to update to firehose value, got %q", retrieved.Endpoint)
 		}
 
@@ -269,7 +269,7 @@ func TestRegistry(t *testing.T) {
 		// Upsert from firehose with enabled=true
 		firehoseLabeler2 := store.Labeler{
 			DID:       did,
-			Endpoint:  "https://another.com/v3",
+			Endpoint:  "another.com",
 			Source:    "firehose",
 			Enabled:   true,
 			UpdatedAt: 3000,
@@ -327,7 +327,7 @@ func TestRegistry(t *testing.T) {
 		// Manual upsert (the admin-add path) must claim the row.
 		manual := store.Labeler{
 			DID:       did,
-			Endpoint:  "https://recovered.example.com/labels",
+			Endpoint:  "recovered.example.com",
 			Source:    "manual",
 			Enabled:   true,
 			UpdatedAt: 5000,
@@ -394,7 +394,7 @@ func TestRegistry(t *testing.T) {
 		const did = "did:plc:sig-policy"
 		if err := reg.Upsert(ctx, store.Labeler{
 			DID:       did,
-			Endpoint:  "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels",
+			Endpoint:  "labeler.example.com",
 			Source:    "manual",
 			Enabled:   true,
 			UpdatedAt: 1234567890,
@@ -453,7 +453,7 @@ func TestRegistry(t *testing.T) {
 		// Discovery later succeeds: the upsert must clear the stale error.
 		if err := reg.Upsert(ctx, store.Labeler{
 			DID:       did,
-			Endpoint:  "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels",
+			Endpoint:  "labeler.example.com",
 			Source:    "firehose",
 			Enabled:   true,
 			UpdatedAt: 1234567890,
@@ -491,7 +491,7 @@ func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
 	for i, did := range dids {
 		if err := reg.Upsert(ctx, store.Labeler{
 			DID:       did,
-			Endpoint:  "https://example.com",
+			Endpoint:  "example.com",
 			Source:    "firehose",
 			Enabled:   true,
 			UpdatedAt: int64(1000 + i),
@@ -514,7 +514,7 @@ func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
 	// Re-upsert through the firehose path: no re-mint.
 	if err := reg.Upsert(ctx, store.Labeler{
 		DID:       dids[0],
-		Endpoint:  "https://example.com/v2",
+		Endpoint:  "v2.example.com",
 		Source:    "firehose",
 		Enabled:   true,
 		UpdatedAt: 2000,
@@ -525,7 +525,7 @@ func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
 	// Re-upsert through the manual path: still no re-mint.
 	if err := reg.Upsert(ctx, store.Labeler{
 		DID:       dids[0],
-		Endpoint:  "https://example.com/v3",
+		Endpoint:  "v3.example.com",
 		Source:    "manual",
 		Enabled:   true,
 		UpdatedAt: 3000,
@@ -545,7 +545,7 @@ func TestUpsertMintsMonotonicObservedSeq(t *testing.T) {
 	// re-upsert's stale view of the table.
 	if err := reg.Upsert(ctx, store.Labeler{
 		DID:       "did:plc:late",
-		Endpoint:  "https://example.com",
+		Endpoint:  "example.com",
 		Source:    "firehose",
 		Enabled:   true,
 		UpdatedAt: 4000,
@@ -579,7 +579,7 @@ func TestRecordErrorMintsObservedSeq(t *testing.T) {
 	for i, did := range []string{"did:plc:one", "did:plc:two"} {
 		if err := reg.Upsert(ctx, store.Labeler{
 			DID:       did,
-			Endpoint:  "https://example.com",
+			Endpoint:  "example.com",
 			Source:    "manual",
 			Enabled:   true,
 			UpdatedAt: int64(1000 + i),
@@ -616,7 +616,7 @@ func TestRecordErrorMintsObservedSeq(t *testing.T) {
 	// The next first insert continues above it.
 	if err := reg.Upsert(ctx, store.Labeler{
 		DID:       "did:plc:four",
-		Endpoint:  "https://example.com",
+		Endpoint:  "example.com",
 		Source:    "manual",
 		Enabled:   true,
 		UpdatedAt: 5000,

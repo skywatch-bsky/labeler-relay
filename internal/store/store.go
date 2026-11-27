@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"fmt"
 
+	"github.com/scarndp/labeler-relay/internal/labelerendpoint"
 	_ "modernc.org/sqlite"
 )
 
@@ -49,13 +50,13 @@ func Open(path string) (*Store, error) {
 // (fresh databases get it from schema.sql, old ones from the ALTER below).
 const idxLabelersObservedSeq = `CREATE UNIQUE INDEX IF NOT EXISTS idx_labelers_observed_seq ON labelers(observed_seq)`
 
-// migrate brings databases created before the observed_seq revision up to the
-// current shape. It is idempotent: fresh databases already have the column
-// from schema.sql and run only the IF NOT EXISTS index creation.
+// migrate adds missing observation sequences and normalizes stored endpoints.
+// Each step is its own transaction and is idempotent, so a crash between the
+// two leaves a database that the next Open completes.
 //
-// The migration is transactional and is the recovery contract: the database is
-// either fully migrated or untouched. A crash (or a mid-backfill failure)
-// rolls the whole migration back, so no mixed NULL/non-NULL state is ever
+// The observed_seq step is the recovery contract for that column. The
+// database is either fully migrated or untouched. A crash (or a mid-backfill
+// failure) rolls the whole step back, so no mixed NULL/non-NULL state is ever
 // reachable and the next Open simply reruns it.
 func migrate(db *sql.DB) error {
 	// Does labelers already carry observed_seq? (Pre-migration databases do not.)
@@ -119,6 +120,46 @@ func migrate(db *sql.DB) error {
 	// above, so the index must be created here for them too.
 	if _, err := db.Exec(idxLabelersObservedSeq); err != nil {
 		return fmt.Errorf("failed to ensure idx_labelers_observed_seq: %w", err)
+	}
+	return migrateEndpoints(db)
+}
+
+func migrateEndpoints(db *sql.DB) error {
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin endpoint migration: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query("SELECT did, endpoint FROM labelers")
+	if err != nil {
+		return fmt.Errorf("failed to read endpoints: %w", err)
+	}
+	defer rows.Close()
+	type endpointUpdate struct{ did, host string }
+	var updates []endpointUpdate
+	for rows.Next() {
+		var did, endpoint string
+		if err := rows.Scan(&did, &endpoint); err != nil {
+			return fmt.Errorf("failed to scan endpoint: %w", err)
+		}
+		host, err := labelerendpoint.Host(endpoint)
+		if err == nil && host != endpoint {
+			updates = append(updates, endpointUpdate{did, host})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to read endpoints: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("failed to close endpoints: %w", err)
+	}
+	for _, update := range updates {
+		if _, err := tx.Exec("UPDATE labelers SET endpoint = ? WHERE did = ?", update.host, update.did); err != nil {
+			return fmt.Errorf("failed to migrate endpoint: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit endpoint migration: %w", err)
 	}
 	return nil
 }

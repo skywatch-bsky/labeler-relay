@@ -2,9 +2,11 @@ package slurper
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -62,7 +64,7 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 			}
 		}
 	})
-	fls.server = httptest.NewServer(mux)
+	fls.server = httptest.NewTLSServer(mux)
 
 	fls.sendFrame = func(frame *atproto.LabelSubscribeLabels_Labels) error {
 		fls.mu.Lock()
@@ -90,6 +92,14 @@ func newFakeLabelerServer(t *testing.T) *fakeLabelerServer {
 	}
 
 	return fls
+}
+
+func (fls *fakeLabelerServer) endpoint() string {
+	return strings.TrimPrefix(fls.server.URL, "https://")
+}
+
+func (fls *fakeLabelerServer) tlsConfig() *tls.Config {
+	return fls.server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 }
 
 func (fls *fakeLabelerServer) dropConn() {

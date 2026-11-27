@@ -1,6 +1,6 @@
 # labeler-relay
 
-Last verified: 2026-11-26
+Last verified: 2026-11-27
 
 ## Tech Stack
 - Language: Go 1.27.3 (enforced minimum in go.mod; security floor)
@@ -24,6 +24,7 @@ Last verified: 2026-11-26
 - `lexicons/` - Lexicon JSON schemas for `community.labeler.sync.subscribeLabelers` and the public query endpoints (`community.labeler.sync.getLabelers`/`getLabeler`)
 - `gen/` - CBOR codegen driver (run via `make cborgen`)
 - `internal/store/` - SQLite store, LabelPersist (seq minting + broadcast), LabelerRegistry, PruneJob
+- `internal/labelerendpoint/` - Pure host extraction and secure subscription URL construction. Stored and API endpoints contain only the host and optional port.
 - `internal/slurper/` - Per-labeler upstream subscriptions with redial, rate limiting, sig policy
 - `internal/firehose/` - Firehose watcher for labeler auto-discovery, DID resolution
 - `internal/server/` - Output WebSocket server: Hub fan-out, backfill-to-live seam, XRPC framing; public query endpoints (`getLabelers`/`getLabeler`) with per-client-IP rate limiting

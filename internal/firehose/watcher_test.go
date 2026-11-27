@@ -53,7 +53,7 @@ func TestWatcherDiscoveryRespectsAutoSubscribeFalse(t *testing.T) {
 	t.Parallel()
 
 	const did = "did:plc:optin-discover"
-	const endpoint = "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels"
+	const endpoint = "labeler.example.com"
 
 	w, _, _ := newWatcherForTestAutoSubscribe(t,
 		&fakeDIDResolver{endpoints: map[string]string{did: endpoint}}, false)
@@ -152,7 +152,7 @@ func TestWatcherHandleCommitDiscoversAndEmits(t *testing.T) {
 	t.Parallel()
 
 	const did = "did:plc:firehose-discover"
-	const endpoint = "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels"
+	const endpoint = "labeler.example.com"
 
 	w, s, pokeCount := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
 	ctx := context.Background()
@@ -251,7 +251,7 @@ func TestWatcherCursorBatching(t *testing.T) {
 
 	const threshold = 5 // small threshold to keep the test fast
 	const did = "did:plc:firehose-cursor-test"
-	const endpoint = "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels"
+	const endpoint = "labeler.example.com"
 
 	w, _, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
 	w.cursorFlushEvery = threshold
@@ -298,7 +298,7 @@ func TestWatcherCursorDialIncludesQuery(t *testing.T) {
 	t.Parallel()
 
 	const did = "did:plc:firehose-url-test"
-	const endpoint = "https://labeler.example.com/xrpc/com.atproto.label.subscribeLabels"
+	const endpoint = "labeler.example.com"
 
 	w, _, _ := newWatcherForTest(t, &fakeDIDResolver{endpoints: map[string]string{did: endpoint}})
 	ctx := context.Background()
@@ -332,7 +332,7 @@ func TestWatcherLastErrorPreserveStickiness(t *testing.T) {
 	t.Parallel()
 
 	const did = "did:plc:firehose-stickiness"
-	const manualEndpoint = "https://manual-labeler.example.com/xrpc/com.atproto.label.subscribeLabels"
+	const manualEndpoint = "manual-labeler.example.com"
 
 	w, _, _ := newWatcherForTest(t, &fakeDIDResolver{errs: map[string]error{did: ErrNoLabelerEndpoint}})
 	ctx := context.Background()
